@@ -1,0 +1,12 @@
+Completed in 1574.0s
+Processed files          : 116,330
+Files with detections    : 9,536
+Half regions             : 18,927
+Double regions           : 1,068
+Total regions            : 19,995
+Low-quality segments     : 57,916
+Confidence histogram     : {'[0.35, 0.50)': 3924, '[0.50, 0.70)': 8065, '[0.70, 0.85)': 4499, '[0.85, 1.00]': 3507}
+Summary CSV              : /home/yt/CTG_test/doubling_halving/output/summary.csv
+Candidate NPZ            : /home/yt/CTG_test/doubling_halving/output/candidate_segments.npz
+Stats JSON               : /home/yt/CTG_test/doubling_halving/output/batch_stats.json
+====================================================================

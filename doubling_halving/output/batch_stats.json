@@ -1,0 +1,40 @@
+{
+  "total_files": 116330,
+  "processed_files": 116330,
+  "files_with_detections": 9536,
+  "files_with_errors": 0,
+  "segments_total": 305815,
+  "segments_short_skipped": 52339,
+  "segments_low_quality_skipped": 57916,
+  "segments_analyzed": 195560,
+  "segments_with_detections": 11777,
+  "total_regions": 19995,
+  "half_regions": 18927,
+  "double_regions": 1068,
+  "duration_stats_all_sec": {
+    "mean": 5.69,
+    "median": 3.5,
+    "max": 108.25
+  },
+  "duration_stats_half_sec": {
+    "mean": 5.667,
+    "median": 3.5,
+    "max": 108.25
+  },
+  "duration_stats_double_sec": {
+    "mean": 6.099,
+    "median": 3.5,
+    "max": 95.75
+  },
+  "confidence_histogram": {
+    "[0.35, 0.50)": 3924,
+    "[0.50, 0.70)": 8065,
+    "[0.70, 0.85)": 4499,
+    "[0.85, 1.00]": 3507
+  },
+  "runtime": {
+    "data_dir": "/scratch2/yzd/CTG/batch1/fetal",
+    "output_dir": "/home/yt/CTG_test/doubling_halving/output",
+    "num_workers": 8
+  }
+}
