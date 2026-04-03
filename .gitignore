@@ -27,3 +27,6 @@ __pycache__/
 
 # vscode
 .vscode/
+
+# local runs
+runs/
