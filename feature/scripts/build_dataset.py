@@ -673,10 +673,20 @@ def main():
         type=str,
         choices=["easy", "hard", "clinical"],
         default="easy",
-        help="噪声模式：easy=原有逻辑；hard=高覆盖、多类、连续段主导；clinical=临床可修复约束模式",
+        help="噪声模式：easy=原有逻辑；hard=高覆盖、多类、连续段主导；clinical=临床可修复约束模式（halving/doubling 使用 baseline-driven 注入）",
     )
-    parser.add_argument("--max_halving_segment_seconds", type=float, default=18.0)
-    parser.add_argument("--max_doubling_segment_seconds", type=float, default=18.0)
+    parser.add_argument(
+        "--max_halving_segment_seconds",
+        type=float,
+        default=15.0,
+        help="clinical halving 最长时长（秒，运行时会 clamp 到 15 秒）",
+    )
+    parser.add_argument(
+        "--max_doubling_segment_seconds",
+        type=float,
+        default=15.0,
+        help="clinical doubling 最长时长（秒，运行时会 clamp 到 15 秒）",
+    )
     parser.add_argument("--max_mhr_segment_seconds", type=float, default=10.0)
     parser.add_argument("--max_missing_segment_seconds", type=float, default=8.0)
     parser.add_argument("--max_spike_segment_seconds", type=float, default=2.0)
