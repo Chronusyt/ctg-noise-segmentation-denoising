@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import csv
 import json
 from pathlib import Path
@@ -8,10 +9,10 @@ from typing import List
 import numpy as np
 
 try:
-    from .config_injection import get_default_config
+    from .config_injection import get_config, get_default_config
     from .inject_doubling_halving import inject_one_signal
 except ImportError:
-    from config_injection import get_default_config
+    from config_injection import get_config, get_default_config
     from inject_doubling_halving import inject_one_signal
 
 
@@ -63,8 +64,29 @@ def _save_metadata_csv(path: Path, rows: List[dict]) -> None:
         writer.writerows(rows)
 
 
+def _parse_args() -> argparse.Namespace:
+    default_cfg = get_default_config()
+    parser = argparse.ArgumentParser(
+        description="Build synthetic doubling/halving dataset from a clean dataset."
+    )
+    parser.add_argument(
+        "--data_path",
+        type=str,
+        default=str(default_cfg.data_path),
+        help="Path to input clean_dataset.npz",
+    )
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        default=str(default_cfg.output_dir),
+        help="Directory for synthetic outputs",
+    )
+    return parser.parse_args()
+
+
 def main() -> None:
-    cfg = get_default_config()
+    args = _parse_args()
+    cfg = get_config(data_path=args.data_path, output_dir=args.output_dir)
     cfg.output_dir.mkdir(parents=True, exist_ok=True)
 
     dataset = np.load(cfg.data_path, allow_pickle=True)

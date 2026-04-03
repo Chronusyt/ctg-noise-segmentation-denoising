@@ -1,10 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 
-PROJECT_ROOT = Path("/home/yt/CTG_test")
+# Resolve project root from this file so the repo can be moved without
+# rewriting absolute paths in config.
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATA_PATH = PROJECT_ROOT / "feature" / "datasets" / "denoising_20min" / "clean_dataset.npz"
 OUTPUT_DIR = PROJECT_ROOT / "doubling_halving" / "synthetic_output"
 
@@ -120,3 +122,18 @@ class InjectionConfig:
 
 def get_default_config() -> InjectionConfig:
     return InjectionConfig()
+
+
+def get_config(
+    data_path: str | Path | None = None,
+    output_dir: str | Path | None = None,
+) -> InjectionConfig:
+    cfg = InjectionConfig()
+    updates = {}
+    if data_path is not None:
+        updates["data_path"] = Path(data_path).expanduser().resolve()
+    if output_dir is not None:
+        updates["output_dir"] = Path(output_dir).expanduser().resolve()
+    if updates:
+        cfg = replace(cfg, **updates)
+    return cfg
