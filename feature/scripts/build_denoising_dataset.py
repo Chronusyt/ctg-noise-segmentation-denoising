@@ -23,49 +23,37 @@ _FEATURE_ROOT = os.path.dirname(_SCRIPT_DIR)
 if _FEATURE_ROOT not in sys.path:
     sys.path.insert(0, _FEATURE_ROOT)
 
+from scripts.dataset_split_utils import resolve_parent_and_chunk_indices, split_parent_groups
+
 SEG_LEN_1MIN = 240  # 1 min @ 4 Hz
 CLASS_NAMES = ["halving", "doubling", "mhr", "missing", "spike"]
 
 
-def load_paired_dataset(paired_path: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """加载 paired_dataset，返回 (clean_signals, noisy_signals, artifact_labels)。"""
+def load_paired_dataset(
+    paired_path: str,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """加载 paired_dataset，返回 clean/noisy/labels 及真实 parent/chunk 元数据。"""
     data = np.load(paired_path)
     clean = np.asarray(data["clean_signals"], dtype=np.float32)
     noisy = np.asarray(data["noisy_signals"], dtype=np.float32)
     labels = np.asarray(data["artifact_labels"], dtype=np.float32)
+    parent_index, chunk_index = resolve_parent_and_chunk_indices(data, clean.shape[0])
     if np.isnan(noisy).any():
         nan_count = np.isnan(noisy).sum()
         noisy = np.nan_to_num(noisy, nan=0.0, posinf=0.0, neginf=0.0)
         print(f"  警告：noisy 含 {nan_count} 个 NaN，已填充为 0")
     if np.isnan(clean).any():
         clean = np.nan_to_num(clean, nan=0.0, posinf=0.0, neginf=0.0)
-    return clean, noisy, labels
-
-
-def split_parents(
-    n_parents: int,
-    train_ratio: float = 0.8,
-    val_ratio: float = 0.1,
-    test_ratio: float = 0.1,
-    seed: int = 42,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """按 parent 索引划分 train/val/test。"""
-    np.random.seed(seed)
-    perm = np.random.permutation(n_parents)
-    n_train = int(n_parents * train_ratio)
-    n_val = int(n_parents * val_ratio)
-    n_test = n_parents - n_train - n_val
-    train_parents = perm[:n_train]
-    val_parents = perm[n_train : n_train + n_val]
-    test_parents = perm[n_train + n_val :]
-    return train_parents, val_parents, test_parents
+    return clean, noisy, labels, parent_index, chunk_index
 
 
 def slice_parents_into_1min(
     clean: np.ndarray,
     noisy: np.ndarray,
     artifact_labels: np.ndarray,
-    parent_indices: np.ndarray,
+    source_parent_index: np.ndarray,
+    source_chunk_index: np.ndarray,
+    selected_parents: np.ndarray,
     seg_len: int = SEG_LEN_1MIN,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
@@ -83,15 +71,21 @@ def slice_parents_into_1min(
     out_parent_idx = []
     out_chunk_idx = []
 
-    for p in parent_indices:
-        for j in range(n_segs_per_parent):
-            start = j * seg_len
-            end = start + seg_len
-            segs_clean.append(clean[p, start:end])
-            segs_noisy.append(noisy[p, start:end])
-            segs_labels.append(artifact_labels[p, start:end, :])
-            out_parent_idx.append(p)
-            out_chunk_idx.append(j)
+    for parent_id in selected_parents:
+        sample_rows = np.where(source_parent_index == parent_id)[0]
+        if sample_rows.size == 0:
+            continue
+        order = np.argsort(source_chunk_index[sample_rows], kind="stable")
+        for row in sample_rows[order]:
+            base_chunk = int(source_chunk_index[row]) * n_segs_per_parent
+            for j in range(n_segs_per_parent):
+                start = j * seg_len
+                end = start + seg_len
+                segs_clean.append(clean[row, start:end])
+                segs_noisy.append(noisy[row, start:end])
+                segs_labels.append(artifact_labels[row, start:end, :])
+                out_parent_idx.append(int(parent_id))
+                out_chunk_idx.append(base_chunk + j)
 
     return (
         np.array(segs_clean, dtype=np.float32),
@@ -146,13 +140,13 @@ def main():
     os.makedirs(output_dir, exist_ok=True)
 
     print("Step 1: 加载 paired_dataset...")
-    clean, noisy, artifact_labels = load_paired_dataset(paired_path)
+    clean, noisy, artifact_labels, parent_index, source_chunk_index = load_paired_dataset(paired_path)
     print(f"  clean: {clean.shape}, noisy: {noisy.shape}, artifact_labels: {artifact_labels.shape}")
 
-    N = clean.shape[0]
+    n_unique_parents = len(np.unique(parent_index))
     print("\nStep 2: 按 parent 划分 train/val/test（先 split 再切，避免泄漏）...")
-    train_parents, val_parents, test_parents = split_parents(
-        N,
+    train_parents, val_parents, test_parents = split_parent_groups(
+        parent_index,
         train_ratio=args.train_ratio,
         val_ratio=args.val_ratio,
         test_ratio=args.test_ratio,
@@ -162,15 +156,16 @@ def main():
 
     print("\nStep 3: 对每个 split 切分为 1 min 子段...")
     train_clean, train_noisy, train_labels, train_pidx, train_cidx = slice_parents_into_1min(
-        clean, noisy, artifact_labels, train_parents, seg_len=args.seg_len
+        clean, noisy, artifact_labels, parent_index, source_chunk_index, train_parents, seg_len=args.seg_len
     )
     val_clean, val_noisy, val_labels, val_pidx, val_cidx = slice_parents_into_1min(
-        clean, noisy, artifact_labels, val_parents, seg_len=args.seg_len
+        clean, noisy, artifact_labels, parent_index, source_chunk_index, val_parents, seg_len=args.seg_len
     )
     test_clean, test_noisy, test_labels, test_pidx, test_cidx = slice_parents_into_1min(
-        clean, noisy, artifact_labels, test_parents, seg_len=args.seg_len
+        clean, noisy, artifact_labels, parent_index, source_chunk_index, test_parents, seg_len=args.seg_len
     )
     print(f"  train segments: {train_noisy.shape[0]}, val: {val_noisy.shape[0]}, test: {test_noisy.shape[0]}")
+    print(f"  unique parents: {n_unique_parents}")
 
     def stats(noisy_arr, clean_arr, labels_arr, name):
         noise_mask = (labels_arr > 0.5).any(axis=-1)

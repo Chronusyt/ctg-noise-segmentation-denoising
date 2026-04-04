@@ -67,14 +67,17 @@ def main():
     train_sig = np.asarray(train["signals"], dtype=np.float32)
     train_mask = np.asarray(train["masks"], dtype=np.float32)
     train_parent = np.asarray(train["parent_indices"], dtype=np.int32)
+    train_chunk = np.asarray(train["chunk_index"], dtype=np.int32) if "chunk_index" in train else None
 
     val_sig = np.asarray(val["signals"], dtype=np.float32)
     val_mask = np.asarray(val["masks"], dtype=np.float32)
     val_parent = np.asarray(val["parent_indices"], dtype=np.int32)
+    val_chunk = np.asarray(val["chunk_index"], dtype=np.int32) if "chunk_index" in val else None
 
     test_sig = np.asarray(test["signals"], dtype=np.float32)
     test_mask = np.asarray(test["masks"], dtype=np.float32)
     test_parent = np.asarray(test["parent_indices"], dtype=np.int32)
+    test_chunk = np.asarray(test["chunk_index"], dtype=np.int32) if "chunk_index" in test else None
 
     # ========== 一、Parent 级别划分 ==========
     log("一、Parent 级别划分")
@@ -108,20 +111,26 @@ def main():
     log("-" * 40)
 
     # 构建 (parent, chunk_index) 映射
-    # 每个 parent 有 20 个 chunk (4800/240)
-    def build_parent_chunk_set(signals: np.ndarray, parents: np.ndarray) -> Set[Tuple[int, int]]:
-        """从 signals 和 parents 推断 (parent, chunk_idx)。同一 parent 的 chunk 按顺序排列。"""
-        seen: Dict[int, int] = {}  # parent -> next chunk index
+    def build_parent_chunk_set(
+        signals: np.ndarray,
+        parents: np.ndarray,
+        chunks: np.ndarray | None,
+    ) -> Set[Tuple[int, int]]:
+        """优先使用真实 chunk_index；仅在缺失时回退到顺序推断。"""
+        if chunks is not None and len(chunks) == len(parents):
+            return {(int(p), int(c)) for p, c in zip(parents, chunks)}
+
+        seen: Dict[int, int] = {}
         out: Set[Tuple[int, int]] = set()
         for p in parents:
-            c = seen.get(p, 0)
+            c = seen.get(int(p), 0)
             out.add((int(p), c))
-            seen[p] = c + 1
+            seen[int(p)] = c + 1
         return out
 
-    train_pc = build_parent_chunk_set(train_sig, train_parent)
-    val_pc = build_parent_chunk_set(val_sig, val_parent)
-    test_pc = build_parent_chunk_set(test_sig, test_parent)
+    train_pc = build_parent_chunk_set(train_sig, train_parent, train_chunk)
+    val_pc = build_parent_chunk_set(val_sig, val_parent, val_chunk)
+    test_pc = build_parent_chunk_set(test_sig, test_parent, test_chunk)
 
     train_val_pc = train_pc & val_pc
     train_test_pc = train_pc & test_pc
@@ -197,10 +206,40 @@ def main():
     log(f"  train ∩ test 完全相同的 signal 数量: {train_test_sig_overlap}")
     log(f"  val ∩ test 完全相同的 signal 数量: {val_test_sig_overlap}")
 
-    # 关键：相同 signal 若来自不同 parent，则非泄漏（仅说明不同录音可有相同 1 min 片段）
-    if train_val_sig_overlap or train_test_sig_overlap or val_test_sig_overlap:
-        log("  注：相同 signal 均来自不同 parent（已抽样验证），故非数据泄漏。")
-        log("  [OK] 跨 split 重复 signal 不构成泄漏")
+    def hash_to_parents(signals: np.ndarray, parents: np.ndarray) -> Dict[bytes, Set[int]]:
+        mapping: Dict[bytes, Set[int]] = {}
+        for sig, parent in zip(signals, parents):
+            key = sig.tobytes()
+            mapping.setdefault(key, set()).add(int(parent))
+        return mapping
+
+    def overlap_same_parent(
+        left: Dict[bytes, Set[int]],
+        right: Dict[bytes, Set[int]],
+    ) -> int:
+        overlaps = 0
+        for key in left.keys() & right.keys():
+            if left[key] & right[key]:
+                overlaps += 1
+        return overlaps
+
+    train_hash_to_parent = hash_to_parents(train_sig, train_parent)
+    val_hash_to_parent = hash_to_parents(val_sig, val_parent)
+    test_hash_to_parent = hash_to_parents(test_sig, test_parent)
+
+    same_parent_train_val = overlap_same_parent(train_hash_to_parent, val_hash_to_parent)
+    same_parent_train_test = overlap_same_parent(train_hash_to_parent, test_hash_to_parent)
+    same_parent_val_test = overlap_same_parent(val_hash_to_parent, test_hash_to_parent)
+
+    log(f"  train ∩ val 且 parent 相同的重复 signal 数量: {same_parent_train_val}")
+    log(f"  train ∩ test 且 parent 相同的重复 signal 数量: {same_parent_train_test}")
+    log(f"  val ∩ test 且 parent 相同的重复 signal 数量: {same_parent_val_test}")
+
+    if same_parent_train_val or same_parent_train_test or same_parent_val_test:
+        has_leakage = True
+        log("  [警告] 发现跨 split 且 parent 相同的重复 signal")
+    elif train_val_sig_overlap or train_test_sig_overlap or val_test_sig_overlap:
+        log("  [OK] 存在跨 split 重复 signal，但来自不同 parent，不按泄漏处理")
     else:
         log("  [OK] 无跨 split 完全重复 signal")
     log("")
@@ -228,7 +267,7 @@ def main():
         log("  [未发现数据泄漏]")
         log("    - parent 无重叠")
         log("    - (parent, chunk) 无重叠")
-        log("    - 跨 split 的相同 signal 均来自不同 parent，不构成泄漏")
+        log("    - 若存在跨 split 相同 signal，也来自不同 parent")
         log("  高 F1 可能来自：")
         log("    - hard 数据集噪声模式相对规律")
         log("    - 1 min 子段较短，噪声区域边界清晰")

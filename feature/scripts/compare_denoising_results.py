@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import os
 import sys
@@ -22,11 +23,27 @@ if _FEATURE_ROOT not in sys.path:
 
 def load_metrics(result_dir: str) -> dict | None:
     """从 test_metrics.json 加载指标。"""
-    path = os.path.join(result_dir, "test_metrics.json")
-    if not os.path.isfile(path):
-        return None
-    with open(path, encoding="utf-8") as f:
-        return json.load(f)
+    candidates = [
+        os.path.join(result_dir, "test_metrics.json"),
+        os.path.join(result_dir, "eval", "test_metrics.json"),
+    ]
+    for path in candidates:
+        if os.path.isfile(path):
+            with open(path, encoding="utf-8") as f:
+                return json.load(f)
+    return None
+
+
+def _derive_json_output_path(output_path: str) -> str:
+    root, ext = os.path.splitext(output_path)
+    return f"{root}.json" if ext else f"{output_path}.json"
+
+
+def _derive_text_output_path(output_path: str) -> str:
+    root, ext = os.path.splitext(output_path)
+    if ext.lower() == ".txt":
+        return output_path
+    return f"{root}.txt" if ext else f"{output_path}.txt"
 
 
 def main():
@@ -110,11 +127,25 @@ def main():
 
     out_text = "\n".join(lines)
     print(out_text)
-    with open(args.output, "w", encoding="utf-8") as f:
-        f.write(out_text)
+    output_ext = os.path.splitext(args.output)[1].lower()
+    if output_ext == ".csv":
+        with open(args.output, "w", encoding="utf-8", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["method", *metrics_keys])
+            for name, metric_row in rows:
+                writer.writerow([name, *[metric_row[k] for k in metrics_keys]])
+    else:
+        with open(args.output, "w", encoding="utf-8") as f:
+            f.write(out_text)
     print(f"\n对比表已保存到 {args.output}")
 
-    json_out = args.output.replace(".txt", ".json")
+    txt_out = _derive_text_output_path(args.output)
+    if txt_out != args.output:
+        with open(txt_out, "w", encoding="utf-8") as f:
+            f.write(out_text)
+        print(f"文本摘要已保存到 {txt_out}")
+
+    json_out = _derive_json_output_path(args.output)
     json_data = {
         "methods": [r[0] for r in rows],
         "metrics": {k: [r[1][k] for r in rows] for k in metrics_keys},
