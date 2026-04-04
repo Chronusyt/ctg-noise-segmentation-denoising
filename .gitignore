@@ -1,32 +1,5 @@
-# datasets
-feature/datasets/
-*/datasets/
-
-# results
-results/
-*/results/
-
-# checkpoints
-*.pt
-*.pth
-*.ckpt
-
-# numpy
-*.npy
-*.npz
-
-# python cache
+artifacts/
 __pycache__/
 *.pyc
-
-# logs
-*.log
-
-# notebook cache
 .ipynb_checkpoints/
-
-# vscode
 .vscode/
-
-# local runs
-runs/
