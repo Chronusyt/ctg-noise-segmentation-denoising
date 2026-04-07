@@ -1,8 +1,9 @@
 """
 Build paper-ready clinical main tables and one comparison figure.
 
-This script does not train models. It reads existing clinical evaluation
-results and checkpoints for:
+This script does not train models or rerun full evaluations. It reads existing
+clinical evaluation JSON files for tables and runs only single-sample inference
+from existing checkpoints for the paper figure:
 1. Direct denoising
 2. Pred-mask guided denoising
 3. GT-mask oracle denoising
@@ -116,6 +117,7 @@ def write_tables(rows: list[dict], table_dir: str) -> None:
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(rows, f, indent=2, ensure_ascii=False)
     print(f"Tables saved to {table_dir}")
+    print("Table source: existing eval/test_metrics.json files; no model evaluation was rerun for tables.")
 
 
 def load_direct_dataset(datasets_root: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -279,6 +281,10 @@ def main() -> None:
     pred_model = load_checkpoint_path(results_roots, "multilabel_guided_denoising_clinical_pred")
     gt_model = load_checkpoint_path(results_roots, "multilabel_guided_denoising_clinical_gt")
 
+    print(
+        "Figure source: running single-sample forward passes from existing checkpoints; "
+        "this does not rerun full evaluation or training."
+    )
     direct_recon = predict_direct(direct_model, noisy[sample_index], device)
     pred_recon = predict_mask_guided(pred_model, noisy[sample_index], pred_masks[sample_index], device)
     gt_recon = predict_mask_guided(gt_model, noisy[sample_index], gt_masks[sample_index], device)
