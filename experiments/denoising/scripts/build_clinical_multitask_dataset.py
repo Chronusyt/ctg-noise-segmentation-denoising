@@ -39,6 +39,32 @@ def validate_alignment(direct: np.lib.npyio.NpzFile, gt: np.lib.npyio.NpzFile, p
     return lines
 
 
+def compute_labels_with_progress(
+    clean: np.ndarray,
+    split: str,
+    cfg: FeatureConfig,
+    chunk_size: int,
+) -> dict[str, np.ndarray]:
+    """Compute clean-signal physiological labels in chunks with readable progress logs."""
+    n = clean.shape[0]
+    if chunk_size <= 0 or chunk_size >= n:
+        print(f"[{split}] 标签计算：一次性处理 {n} 条 clean signal", flush=True)
+        return compute_multitask_physiology_labels(clean, config=cfg)
+
+    chunks: list[dict[str, np.ndarray]] = []
+    for start in range(0, n, chunk_size):
+        end = min(start + chunk_size, n)
+        print(
+            f"[{split}] 标签计算进度：{start}-{end} / {n} "
+            f"({end / n * 100:.1f}%)",
+            flush=True,
+        )
+        chunks.append(compute_multitask_physiology_labels(clean[start:end], config=cfg))
+
+    keys = chunks[0].keys()
+    return {key: np.concatenate([chunk[key] for chunk in chunks], axis=0) for key in keys}
+
+
 def build_split(
     split: str,
     direct_dir: str,
@@ -46,6 +72,7 @@ def build_split(
     pred_mask_dir: str | None,
     output_dir: str,
     cfg: FeatureConfig,
+    chunk_size: int,
 ) -> dict:
     direct = load_direct_split(direct_dir, split)
     gt = load_mask_split(gt_mask_dir, split)
@@ -58,8 +85,8 @@ def build_split(
     gt_masks = np.asarray(gt["masks"], dtype=np.float32)
     pred_masks = np.asarray(pred["masks"], dtype=np.float32) if pred is not None else None
 
-    print(f"[{split}] computing physiological labels from clean_signals {clean.shape}...", flush=True)
-    features = compute_multitask_physiology_labels(clean, config=cfg)
+    print(f"[{split}] 开始基于 clean_signals 生成 physiological labels: shape={clean.shape}", flush=True)
+    features = compute_labels_with_progress(clean, split=split, cfg=cfg, chunk_size=chunk_size)
 
     out_path = os.path.join(output_dir, f"{split}_dataset_multitask.npz")
     payload = {
@@ -88,6 +115,7 @@ def build_split(
     if pred_masks is not None:
         payload["pred_masks"] = pred_masks
 
+    print(f"[{split}] 保存 multitask 数据到: {out_path}", flush=True)
     np.savez_compressed(out_path, **payload)
     return {
         "split": split,
@@ -243,6 +271,7 @@ def main() -> None:
     )
     parser.add_argument("--splits", nargs="+", default=["train", "val", "test"], choices=["train", "val", "test"])
     parser.add_argument("--sample_rate", type=float, default=4.0)
+    parser.add_argument("--chunk_size", type=int, default=4096, help="Number of samples per label-computation chunk; <=0 disables chunking")
     parser.add_argument("--write_reports_only", action="store_true", help="Write label source/definition reports without building npz files")
     args = parser.parse_args()
 
@@ -260,7 +289,10 @@ def main() -> None:
     if args.write_reports_only:
         print(f"Label source/definition reports saved to {summary_dir}")
         return
-    summaries = [build_split(split, direct_dir, gt_mask_dir, pred_mask_dir, output_dir, cfg) for split in args.splits]
+    summaries = [
+        build_split(split, direct_dir, gt_mask_dir, pred_mask_dir, output_dir, cfg, args.chunk_size)
+        for split in args.splits
+    ]
     write_description(output_dir, summaries, cfg)
 
     report_path = os.path.join(summary_dir, "multitask_dataset_build_report.txt")

@@ -13,16 +13,30 @@ Interpretation checks:
 Feature absolute-error distribution:
 [Direct denoising]
   baseline: mean=0.0977, median=0.0000, p95=1.0000, p99=2.0000, max=21.0000, top1pct_share=0.472
-  stv: mean=0.1334, median=0.0713, p95=0.3863, p99=0.8189, max=43.7005, top1pct_share=0.138
-  ltv: mean=0.6881, median=0.5117, p95=1.3358, p99=3.2551, max=552.9439, top1pct_share=0.186
+  stv: mean=0.1334, median=0.0714, p95=0.3863, p99=0.8199, max=43.7013, top1pct_share=0.138
+  ltv: mean=0.6881, median=0.5119, p95=1.3361, p99=3.2578, max=552.9505, top1pct_share=0.186
 [Pred-mask guided]
-  baseline: mean=0.0895, median=0.0000, p95=1.0000, p99=2.0000, max=13.0000, top1pct_share=0.437
-  stv: mean=0.0961, median=0.0592, p95=0.2323, p99=0.7199, max=44.7261, top1pct_share=0.187
-  ltv: mean=0.4918, median=0.3033, p95=0.9644, p99=3.2657, max=568.9825, top1pct_share=0.255
+  baseline: mean=0.0896, median=0.0000, p95=1.0000, p99=2.0000, max=13.0000, top1pct_share=0.437
+  stv: mean=0.0961, median=0.0593, p95=0.2325, p99=0.7199, max=44.7255, top1pct_share=0.187
+  ltv: mean=0.4921, median=0.3034, p95=0.9648, p99=3.2653, max=568.9704, top1pct_share=0.255
 [GT-mask oracle]
   baseline: mean=0.0632, median=0.0000, p95=0.0000, p99=1.0000, max=13.0000, top1pct_share=0.422
-  stv: mean=0.1437, median=0.1048, p95=0.3800, p99=0.6782, max=5.2365, top1pct_share=0.090
-  ltv: mean=0.6945, median=0.5342, p95=1.6115, p99=2.8752, max=37.9360, top1pct_share=0.101
+  stv: mean=0.1437, median=0.1047, p95=0.3801, p99=0.6786, max=5.2347, top1pct_share=0.090
+  ltv: mean=0.6943, median=0.5340, p95=1.6112, p99=2.8818, max=37.9362, top1pct_share=0.101
+
+Feature bias distribution (reconstructed - clean):
+[Direct denoising]
+  baseline: mean=0.0064, median=0.0000, p05=0.0000, p95=0.0000
+  stv: mean=-0.0963, median=-0.0465, p05=-0.3726, p95=0.0861
+  ltv: mean=-0.5256, median=-0.4073, p05=-1.3159, p95=0.4243
+[Pred-mask guided]
+  baseline: mean=-0.0175, median=0.0000, p05=0.0000, p95=0.0000
+  stv: mean=0.0034, median=0.0091, p05=-0.1356, p95=0.1868
+  ltv: mean=-0.0296, median=0.0383, p05=-0.6909, p95=0.7762
+[GT-mask oracle]
+  baseline: mean=0.0095, median=0.0000, p05=0.0000, p95=0.0000
+  stv: mean=0.0871, median=0.0847, p05=-0.1303, p95=0.3461
+  ltv: mean=0.4815, median=0.4777, p05=-0.4619, p95=1.5533
 
 Outlier readout:
 - top1pct_share > 0.20 suggests a small tail materially contributes to feature error.
