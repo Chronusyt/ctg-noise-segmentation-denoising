@@ -28,7 +28,7 @@ for _path in (_REPO_ROOT, _SRC_ROOT):
     if str(_path) not in sys.path:
         sys.path.insert(0, str(_path))
 
-from ctg_pipeline.evaluation.feature_preservation import FeatureConfig, compute_signal_features, feature_title
+from ctg_pipeline.features.physiology import FeatureConfig, compute_signal_features, feature_title
 from ctg_pipeline.models.unet1d_denoiser import UNet1DDenoiser
 from ctg_pipeline.models.unet1d_mask_guided_denoiser import UNet1DMaskGuidedDenoiser
 from ctg_pipeline.utils.pathing import ARTIFACTS_ROOT, DENOISING_DATASETS_ROOT, DENOISING_RESULTS_ROOT, resolve_repo_path
@@ -148,6 +148,20 @@ def load_checkpoint_path(results_roots: list[str], subdir: str) -> str:
     return os.path.join(results_roots[0], subdir, "best_model.pt")
 
 
+def resolve_sample_indices(labels: np.ndarray, sample_index: int, n_samples: int, sample_indices: str) -> list[int]:
+    """Resolve one or more clinical test samples for figure generation."""
+    n_total = labels.shape[0]
+    if sample_indices:
+        out = [int(x.strip()) for x in sample_indices.split(",") if x.strip()]
+    elif sample_index >= 0:
+        out = [sample_index]
+    else:
+        noise_coverage = (labels > 0.5).any(axis=-1).mean(axis=1)
+        order = np.argsort(-noise_coverage)
+        out = [int(i) for i in order[: max(1, n_samples)]]
+    return [max(0, min(int(i), n_total - 1)) for i in out]
+
+
 def predict_direct(model_path: str, noisy: np.ndarray, device: str) -> np.ndarray:
     model = UNet1DDenoiser(in_channels=1, out_channels=1, base_channels=32, depth=3)
     ckpt = torch.load(model_path, map_location=device)
@@ -249,6 +263,9 @@ def main() -> None:
         default=str(ARTIFACTS_ROOT / "results" / "paper_figures" / "clinical_main"),
     )
     parser.add_argument("--sample_index", type=int, default=-1, help="-1 selects the noisiest clinical test segment")
+    parser.add_argument("--sample_indices", type=str, default="", help="Comma-separated explicit test sample indices")
+    parser.add_argument("--n_samples", type=int, default=1, help="Number of noisiest samples to plot when sample_index=-1")
+    parser.add_argument("--skip_tables", action="store_true", help="Only generate figures; do not rewrite table files")
     parser.add_argument("--device", type=str, default="")
     args = parser.parse_args()
 
@@ -267,13 +284,12 @@ def main() -> None:
     for _key, method_name, subdir in METHODS:
         source_dir, data = resolve_result_dir(results_roots, subdir)
         rows.append({"method": method_name, "source_dir": source_dir, **extract_metrics(data)})
-    write_tables(rows, table_dir)
+    if not args.skip_tables:
+        write_tables(rows, table_dir)
 
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     noisy, clean, labels = load_direct_dataset(datasets_root)
-    noise_coverage = (labels > 0.5).any(axis=-1).mean(axis=1)
-    sample_index = int(np.argmax(noise_coverage)) if args.sample_index < 0 else int(args.sample_index)
-    sample_index = max(0, min(sample_index, noisy.shape[0] - 1))
+    sample_indices = resolve_sample_indices(labels, args.sample_index, args.n_samples, args.sample_indices)
 
     pred_masks = load_mask_dataset(datasets_root, "pred")
     gt_masks = load_mask_dataset(datasets_root, "gt")
@@ -285,21 +301,22 @@ def main() -> None:
         "Figure source: running single-sample forward passes from existing checkpoints; "
         "this does not rerun full evaluation or training."
     )
-    direct_recon = predict_direct(direct_model, noisy[sample_index], device)
-    pred_recon = predict_mask_guided(pred_model, noisy[sample_index], pred_masks[sample_index], device)
-    gt_recon = predict_mask_guided(gt_model, noisy[sample_index], gt_masks[sample_index], device)
+    for sample_index in sample_indices:
+        direct_recon = predict_direct(direct_model, noisy[sample_index], device)
+        pred_recon = predict_mask_guided(pred_model, noisy[sample_index], pred_masks[sample_index], device)
+        gt_recon = predict_mask_guided(gt_model, noisy[sample_index], gt_masks[sample_index], device)
 
-    fig_path = os.path.join(figure_dir, f"clinical_main_comparison_sample_{sample_index}.png")
-    plot_clinical_comparison(
-        noisy=noisy[sample_index],
-        clean=clean[sample_index],
-        labels=labels[sample_index],
-        direct=direct_recon,
-        pred=pred_recon,
-        gt=gt_recon,
-        sample_index=sample_index,
-        save_path=fig_path,
-    )
+        fig_path = os.path.join(figure_dir, f"clinical_main_comparison_sample_{sample_index}.png")
+        plot_clinical_comparison(
+            noisy=noisy[sample_index],
+            clean=clean[sample_index],
+            labels=labels[sample_index],
+            direct=direct_recon,
+            pred=pred_recon,
+            gt=gt_recon,
+            sample_index=sample_index,
+            save_path=fig_path,
+        )
 
 
 if __name__ == "__main__":

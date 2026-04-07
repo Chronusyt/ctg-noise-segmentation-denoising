@@ -1,0 +1,35 @@
+Clinical main self-check report
+datasets_root: /home/yt/CTG_test/artifacts/datasets/denoising
+splits_checked: train, val, test
+
+[train]
+noisy_signals: shapes direct/pred/gt=(259660, 240)/(259660, 240)/(259660, 240), shape_equal=True, direct==pred=True, direct==gt=True
+clean_signals: shapes direct/pred/gt=(259660, 240)/(259660, 240)/(259660, 240), shape_equal=True, direct==pred=True, direct==gt=True
+artifact_labels: shapes direct/pred/gt=(259660, 240, 5)/(259660, 240, 5)/(259660, 240, 5), shape_equal=True, direct==pred=True, direct==gt=True
+parent_index: shapes direct/pred/gt=(259660,)/(259660,)/(259660,), shape_equal=True, direct==pred=True, direct==gt=True
+chunk_index: shapes direct/pred/gt=(259660,)/(259660,)/(259660,), shape_equal=True, direct==pred=True, direct==gt=True
+pred masks shape: (259660, 240, 5)
+gt masks shape: (259660, 240, 5)
+sample_mismatch_found: False
+
+[val]
+noisy_signals: shapes direct/pred/gt=(32440, 240)/(32440, 240)/(32440, 240), shape_equal=True, direct==pred=True, direct==gt=True
+clean_signals: shapes direct/pred/gt=(32440, 240)/(32440, 240)/(32440, 240), shape_equal=True, direct==pred=True, direct==gt=True
+artifact_labels: shapes direct/pred/gt=(32440, 240, 5)/(32440, 240, 5)/(32440, 240, 5), shape_equal=True, direct==pred=True, direct==gt=True
+parent_index: shapes direct/pred/gt=(32440,)/(32440,)/(32440,), shape_equal=True, direct==pred=True, direct==gt=True
+chunk_index: shapes direct/pred/gt=(32440,)/(32440,)/(32440,), shape_equal=True, direct==pred=True, direct==gt=True
+pred masks shape: (32440, 240, 5)
+gt masks shape: (32440, 240, 5)
+sample_mismatch_found: False
+
+[test]
+noisy_signals: shapes direct/pred/gt=(32480, 240)/(32480, 240)/(32480, 240), shape_equal=True, direct==pred=True, direct==gt=True
+clean_signals: shapes direct/pred/gt=(32480, 240)/(32480, 240)/(32480, 240), shape_equal=True, direct==pred=True, direct==gt=True
+artifact_labels: shapes direct/pred/gt=(32480, 240, 5)/(32480, 240, 5)/(32480, 240, 5), shape_equal=True, direct==pred=True, direct==gt=True
+parent_index: shapes direct/pred/gt=(32480,)/(32480,)/(32480,), shape_equal=True, direct==pred=True, direct==gt=True
+chunk_index: shapes direct/pred/gt=(32480,)/(32480,)/(32480,), shape_equal=True, direct==pred=True, direct==gt=True
+pred masks shape: (32480, 240, 5)
+gt masks shape: (32480, 240, 5)
+sample_mismatch_found: False
+
+overall_sample_mismatch_found: False

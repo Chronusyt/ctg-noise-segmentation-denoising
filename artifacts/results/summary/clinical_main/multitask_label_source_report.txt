@@ -1,0 +1,17 @@
+Clinical physiological multitask label source report
+
+Reusable code found:
+- baseline: src/ctg_pipeline/preprocessing/fhr_baseline_optimized.py :: analyse_baseline_optimized, BaselineConfig
+- STV/LTV: src/ctg_pipeline/preprocessing/variability.py :: compute_stv_overall, compute_ltv_overall, STVConfig, LTVConfig
+- baseline variability: src/ctg_pipeline/preprocessing/baseline_variability.py :: compute_baseline_variability, classify_baseline_variability, BaselineVariabilityConfig
+- acceleration: src/ctg_pipeline/preprocessing/acc_detection_figo_v2.py :: detect_accelerations_figo, AccelerationConfig, AccelerationCriterion
+- deceleration: src/ctg_pipeline/preprocessing/dec_detection_figo_v2.py :: detect_decelerations_figo, DecelerationConfig, DecelerationCriterion
+- historical integrated feature flow: experiments/denoising/scripts/extract_features.py
+- unified v1 wrapper used here: src/ctg_pipeline/features/physiology.py :: compute_multitask_physiology_labels
+
+Reuse decision:
+- baseline/STV/LTV/BV/acc/dec are all reused from existing project modules.
+- No new clinical rule system is introduced in this round.
+- A thin wrapper was added only to make label generation consistent and reusable.
+
+multitask_output_dir: /home/yt/CTG_test/artifacts/datasets/denoising/clinical_multitask_physiology_v1

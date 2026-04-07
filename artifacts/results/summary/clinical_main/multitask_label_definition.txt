@@ -1,0 +1,25 @@
+Clinical physiological multitask label definition v1
+
+Scope:
+- clinical data line only
+- labels are computed from clean target FHR only
+- no multitask model training is introduced in this round
+
+Labels:
+- clean_signal: reconstruction target, shape [L], copied from existing clinical clean target
+- baseline: scalar float32, shape [N], mean optimized baseline trace in bpm
+- STV: scalar float32, shape [N], pulse-interval STV in ms, excluding detected acc/dec regions
+- LTV: scalar float32, shape [N], pulse-interval LTV in ms, excluding detected acc/dec regions
+- baseline_variability: scalar float32, shape [N], continuous regression target, mean robust 1-min baseline-deviation amplitude in bpm
+- baseline_variability_class: auxiliary int32, shape [N], -1 unknown, 0 absent, 1 minimal/reduced, 2 moderate/normal, 3 marked
+- acc_label: uint8, shape [N,L], pointwise acceleration label from clean FHR and FIGO 15x15 detector
+- dec_label: uint8, shape [N,L], pointwise deceleration label from clean FHR and FIGO 15x15 detector
+
+Baseline variability decision:
+- v1 main label uses continuous regression rather than a primary class label.
+- Reason: the existing module computes a continuous variability trace in bpm, and regression is consistent with baseline/STV/LTV scalar heads.
+- The clinical class id is still saved as auxiliary metadata for later classification experiments.
+
+Acceleration/deceleration decision:
+- v1 uses pointwise binary labels rather than only sample-level counts.
+- Reason: the project already has FIGO v2 detectors that return binary event signals, and point labels are better aligned with future multitask temporal heads.

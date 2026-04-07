@@ -1,0 +1,29 @@
+Clinical feature-preservation error diagnosis
+n_samples: 32480
+
+Current aggregate metrics:
+- Direct denoising: overall_mse=0.1966, overall_mae=0.2059, baseline_mae=0.0977, stv_mae=0.1334, ltv_mae=0.6881
+- Pred-mask guided: overall_mse=0.1822, overall_mae=0.1856, baseline_mae=0.0896, stv_mae=0.0961, ltv_mae=0.4921
+- GT-mask oracle: overall_mse=0.1281, overall_mae=0.2166, baseline_mae=0.0632, stv_mae=0.1437, ltv_mae=0.6943
+
+Interpretation checks:
+- Pred-mask guided vs direct: overall_mse -0.0144, overall_mae -0.0203, baseline_mae -0.0081, stv_mae -0.0373, ltv_mae -0.1960
+- GT-mask oracle vs direct: overall_mse -0.0685, overall_mae +0.0106, baseline_mae -0.0345, stv_mae +0.0103, ltv_mae +0.0062
+
+Feature absolute-error distribution:
+[Direct denoising]
+  baseline: mean=0.0977, median=0.0000, p95=1.0000, p99=2.0000, max=21.0000, top1pct_share=0.472
+  stv: mean=0.1334, median=0.0713, p95=0.3863, p99=0.8189, max=43.7005, top1pct_share=0.138
+  ltv: mean=0.6881, median=0.5117, p95=1.3358, p99=3.2551, max=552.9439, top1pct_share=0.186
+[Pred-mask guided]
+  baseline: mean=0.0895, median=0.0000, p95=1.0000, p99=2.0000, max=13.0000, top1pct_share=0.437
+  stv: mean=0.0961, median=0.0592, p95=0.2323, p99=0.7199, max=44.7261, top1pct_share=0.187
+  ltv: mean=0.4918, median=0.3033, p95=0.9644, p99=3.2657, max=568.9825, top1pct_share=0.255
+[GT-mask oracle]
+  baseline: mean=0.0632, median=0.0000, p95=0.0000, p99=1.0000, max=13.0000, top1pct_share=0.422
+  stv: mean=0.1437, median=0.1048, p95=0.3800, p99=0.6782, max=5.2365, top1pct_share=0.090
+  ltv: mean=0.6945, median=0.5342, p95=1.6115, p99=2.8752, max=37.9360, top1pct_share=0.101
+
+Outlier readout:
+- top1pct_share > 0.20 suggests a small tail materially contributes to feature error.
+- Inspect feature_error_outliers.csv for the largest per-sample errors.
