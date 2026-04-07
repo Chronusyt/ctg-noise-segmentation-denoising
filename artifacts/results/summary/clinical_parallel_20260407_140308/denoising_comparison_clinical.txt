@@ -1,0 +1,27 @@
+================================================================================
+去噪方法对比
+================================================================================
+实验标签: clinical
+结果检索根目录:
+  - /home/yt/CTG_test/artifacts/results/denoising
+  - /home/yt/CTG_test/artifacts/runs/results/denoising
+
+方法                                         overall_mse corrupted_region_mse   clean_region_mse        overall_mae corrupted_region_mae   clean_region_mae       baseline_mae            stv_mae            ltv_mae baseline_bias_mean baseline_bias_median      stv_bias_mean    stv_bias_median      ltv_bias_mean    ltv_bias_median
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Direct denoising baseline                       0.1966            10.2344             0.1209             0.2059             2.1309             0.1914             0.0977             0.1334             0.6881             0.0064             0.0000            -0.0963            -0.0465            -0.5256            -0.4073
+source                              /home/yt/CTG_test/artifacts/results/denoising/denoising_baseline_clinical
+Multilabel pred-mask guided                     0.1822             9.5503             0.1116             0.1856             2.0771             0.1713             0.0896             0.0961             0.4921            -0.0175             0.0000             0.0034             0.0091            -0.0296             0.0383
+source                              /home/yt/CTG_test/artifacts/results/denoising/multilabel_guided_denoising_clinical_pred
+Multilabel GT-mask oracle                       0.1281             8.9142             0.0618             0.2166             1.9886             0.2032             0.0632             0.1437             0.6943             0.0095             0.0000             0.0871             0.0847             0.4815             0.4777
+source                              /home/yt/CTG_test/artifacts/results/denoising/multilabel_guided_denoising_clinical_gt
+
+说明:
+  - Direct denoising: noisy -> clean，无 mask 引导
+  - Pred-mask guided: noisy + predicted 5-class masks -> clean，真实可部署方案
+  - GT-mask oracle: noisy + GT 5-class masks -> clean，mask 条件的诊断参考；不保证所有误差/feature 指标都最优
+
+结论:
+  1. 若 pred-mask 优于 direct：知道噪声类型有助于去噪
+  2. 若 GT-mask 在 MSE 上优于 pred-mask：更准确的 mask 有进一步提升重建误差的潜力
+  3. 若 GT-mask 在 feature-preservation 上弱于 pred-mask：需要检查 GT-mask 训练稳定性、mask 分布或 loss 设计
+================================================================================

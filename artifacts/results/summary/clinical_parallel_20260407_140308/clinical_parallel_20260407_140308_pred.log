@@ -1,0 +1,81 @@
+[Pred] start: 2026年 04月 07日 星期二 14:05:41 CST
+Mask-guided denoiser 训练启动 (mask_source=pred)...
+使用设备: cuda
+加载数据...
+  train: noisy (259660, 240), masks (259660, 240, 5)
+  val: noisy (32440, 240), masks (32440, 240, 5)
+Epoch 1: train_loss=3805.7820, val_loss=2.5849 [best, saved]
+Epoch 2: train_loss=2.5935, val_loss=1.1942 [best, saved]
+Epoch 3: train_loss=2.0895, val_loss=0.3613 [best, saved]
+Epoch 4: train_loss=1.9739, val_loss=6.0239
+Epoch 5: train_loss=1.8429, val_loss=3.3829
+Epoch 6: train_loss=1.7697, val_loss=0.8714
+Epoch 7: train_loss=1.7051, val_loss=4.2824
+Epoch 8: train_loss=1.7005, val_loss=5.6332
+Epoch 9: train_loss=1.6597, val_loss=4.3134
+Epoch 10: train_loss=1.5765, val_loss=1.5220
+Epoch 11: train_loss=1.4739, val_loss=0.3120 [best, saved]
+Epoch 12: train_loss=1.4532, val_loss=1.2227
+Epoch 13: train_loss=1.5260, val_loss=0.3650
+Epoch 14: train_loss=1.5126, val_loss=0.4287
+Epoch 15: train_loss=1.4687, val_loss=1.6958
+Epoch 16: train_loss=1.4439, val_loss=5.9011
+Epoch 17: train_loss=1.4794, val_loss=0.2360 [best, saved]
+Epoch 18: train_loss=1.4779, val_loss=0.6329
+Epoch 19: train_loss=1.4506, val_loss=5.6873
+Epoch 20: train_loss=1.4723, val_loss=0.8257
+Epoch 21: train_loss=1.4466, val_loss=1.1757
+Epoch 22: train_loss=1.4317, val_loss=2.8400
+Epoch 23: train_loss=1.3936, val_loss=0.9260
+Epoch 24: train_loss=1.3285, val_loss=0.5762
+Epoch 25: train_loss=1.3403, val_loss=1.1797
+Epoch 26: train_loss=1.3020, val_loss=0.1770 [best, saved]
+Epoch 27: train_loss=1.3195, val_loss=0.1907
+Epoch 28: train_loss=1.3210, val_loss=0.3080
+Epoch 29: train_loss=1.3791, val_loss=0.4751
+Epoch 30: train_loss=1.3333, val_loss=0.1855
+
+训练完成。best_model.pt、last_model.pt、config.json 已保存到 /home/yt/CTG_test/artifacts/results/denoising/multilabel_guided_denoising_clinical_pred
+mask_source=pred, 使用设备: cuda
+加载 test 数据...
+  noisy: (32480, 240), clean: (32480, 240), masks: (32480, 240, 5)
+加载模型...
+预测...
+计算 feature-preservation 指标（baseline/STV/LTV）...
+
+========== Mask-guided denoiser 评估 ==========
+Overall:
+  overall_mse: 0.1822
+  corrupted_region_mse: 9.5503
+  clean_region_mse: 0.1116
+  overall_mae: 0.1856
+  corrupted_region_mae: 2.0771
+  clean_region_mae: 0.1713
+Per-sample 平均:
+  overall_mse: 0.1822
+  corrupted_region_mse: 7.6868
+  clean_region_mse: 0.1115
+  overall_mae: 0.1856
+  corrupted_region_mae: 1.8655
+  clean_region_mae: 0.1715
+Feature-preservation:
+  baseline_mae: 0.0896
+  baseline_bias_mean: -0.0175
+  baseline_bias_median: 0.0000
+  baseline_clean_mean: 142.7911
+  baseline_reconstructed_mean: 142.7736
+  stv_mae: 0.0961
+  stv_bias_mean: 0.0034
+  stv_bias_median: 0.0091
+  stv_clean_mean: 6.8952
+  stv_reconstructed_mean: 6.8986
+  ltv_mae: 0.4921
+  ltv_bias_mean: -0.0296
+  ltv_bias_median: 0.0383
+  ltv_clean_mean: 39.4251
+  ltv_reconstructed_mean: 39.3954
+
+指标已保存到 /home/yt/CTG_test/artifacts/results/denoising/multilabel_guided_denoising_clinical_pred/eval/test_metrics.txt
+JSON 已保存到 /home/yt/CTG_test/artifacts/results/denoising/multilabel_guided_denoising_clinical_pred/eval/test_metrics.json
+  可视化已保存到 /home/yt/CTG_test/artifacts/results/denoising/multilabel_guided_denoising_clinical_pred/eval/visualizations
+[Pred] done: 2026年 04月 07日 星期二 14:37:59 CST

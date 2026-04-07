@@ -1,0 +1,97 @@
+[Direct] start: 2026年 04月 07日 星期二 14:05:41 CST
+Direct denoising 训练启动...
+使用设备: cuda
+加载数据...
+  train: (259660, 240)
+  val: (32440, 240)
+Epoch 1: train_loss=3663.0520, val_loss=5.9281 [best, saved]
+Epoch 2: train_loss=2.5736, val_loss=0.9712 [best, saved]
+Epoch 3: train_loss=2.1790, val_loss=3.7119
+Epoch 4: train_loss=2.0462, val_loss=0.7312 [best, saved]
+Epoch 5: train_loss=1.8780, val_loss=1.4037
+Epoch 6: train_loss=1.7869, val_loss=0.8353
+Epoch 7: train_loss=1.7898, val_loss=1.2157
+Epoch 8: train_loss=1.7753, val_loss=1.9734
+Epoch 9: train_loss=1.6659, val_loss=0.6370 [best, saved]
+Epoch 10: train_loss=1.6641, val_loss=0.3288 [best, saved]
+Epoch 11: train_loss=1.6616, val_loss=0.2802 [best, saved]
+Epoch 12: train_loss=1.6572, val_loss=0.4277
+Epoch 13: train_loss=1.6447, val_loss=1.8149
+Epoch 14: train_loss=1.5728, val_loss=0.4899
+Epoch 15: train_loss=1.5691, val_loss=0.9047
+Epoch 16: train_loss=1.5318, val_loss=0.6982
+Epoch 17: train_loss=1.5875, val_loss=0.8243
+Epoch 18: train_loss=1.4566, val_loss=0.5293
+Epoch 19: train_loss=1.4375, val_loss=1.3271
+Epoch 20: train_loss=1.4175, val_loss=0.4613
+Epoch 21: train_loss=1.4241, val_loss=0.1859 [best, saved]
+Epoch 22: train_loss=1.3952, val_loss=0.2264
+Epoch 23: train_loss=1.3720, val_loss=0.1942
+Epoch 24: train_loss=1.4252, val_loss=0.3602
+Epoch 25: train_loss=1.4216, val_loss=0.2293
+Epoch 26: train_loss=1.3751, val_loss=0.5797
+Epoch 27: train_loss=1.3915, val_loss=0.6572
+Epoch 28: train_loss=1.3299, val_loss=0.1753 [best, saved]
+Epoch 29: train_loss=1.3014, val_loss=0.1898
+Epoch 30: train_loss=1.3325, val_loss=0.2204
+
+训练完成。best_model.pt、last_model.pt、config.json 已保存到 /home/yt/CTG_test/artifacts/results/denoising/denoising_baseline_clinical
+使用设备: cuda
+加载 test 数据...
+  noisy: (32480, 240), clean: (32480, 240)
+
+========== Identity baseline（noisy 直接作为输出）==========
+Overall:
+  overall_mse: 59.5781
+  corrupted_region_mse: 7961.1702
+  clean_region_mse: 0.0000
+  overall_mae: 0.6107
+  corrupted_region_mae: 81.6030
+  clean_region_mae: 0.0000
+Per-sample 平均:
+  overall_mse: 59.5781
+  corrupted_region_mse: 6650.8624
+  clean_region_mse: 0.0000
+  overall_mae: 0.6107
+  corrupted_region_mae: 69.2985
+  clean_region_mae: 0.0000
+
+========== Learned denoiser ==========
+预测...
+计算 feature-preservation 指标（baseline/STV/LTV）...
+Overall:
+  overall_mse: 0.1966
+  corrupted_region_mse: 10.2344
+  clean_region_mse: 0.1209
+  overall_mae: 0.2059
+  corrupted_region_mae: 2.1309
+  clean_region_mae: 0.1914
+Per-sample 平均:
+  overall_mse: 0.1966
+  corrupted_region_mse: 10.1918
+  clean_region_mse: 0.1211
+  overall_mae: 0.2059
+  corrupted_region_mae: 2.2424
+  clean_region_mae: 0.1915
+Feature-preservation:
+  baseline_mae: 0.0977
+  baseline_bias_mean: 0.0064
+  baseline_bias_median: 0.0000
+  baseline_clean_mean: 142.7911
+  baseline_reconstructed_mean: 142.7976
+  stv_mae: 0.1334
+  stv_bias_mean: -0.0963
+  stv_bias_median: -0.0465
+  stv_clean_mean: 6.8952
+  stv_reconstructed_mean: 6.7990
+  ltv_mae: 0.6881
+  ltv_bias_mean: -0.5256
+  ltv_bias_median: -0.4073
+  ltv_clean_mean: 39.4251
+  ltv_reconstructed_mean: 38.8994
+
+指标已保存到 /home/yt/CTG_test/artifacts/results/denoising/denoising_baseline_clinical/eval/test_metrics.txt
+JSON 已保存到 /home/yt/CTG_test/artifacts/results/denoising/denoising_baseline_clinical/eval/test_metrics.json
+  可视化：从 3295 个含噪声样本中抽样 5 个
+  可视化已保存到 /home/yt/CTG_test/artifacts/results/denoising/denoising_baseline_clinical/eval/visualizations
+[Direct] done: 2026年 04月 07日 星期二 14:38:13 CST

@@ -1,0 +1,41 @@
+[
+  {
+    "method": "Direct denoising",
+    "source_dir": "/home/yt/CTG_test/artifacts/results/denoising/denoising_baseline_clinical",
+    "overall_mse": 0.19661445461029856,
+    "overall_mae": 0.2059388181973365,
+    "corrupted_region_mse": 10.23441983268434,
+    "corrupted_region_mae": 2.1309132657074628,
+    "clean_region_mse": 0.12092934310577584,
+    "clean_region_mae": 0.19142449955738744,
+    "baseline_mae": 0.09769088669950739,
+    "stv_mae": 0.13338863863131437,
+    "ltv_mae": 0.6881426115550707
+  },
+  {
+    "method": "Pred-mask guided",
+    "source_dir": "/home/yt/CTG_test/artifacts/results/denoising/multilabel_guided_denoising_clinical_pred",
+    "overall_mse": 0.18220245376926827,
+    "overall_mae": 0.18561035255493202,
+    "corrupted_region_mse": 9.550267113283345,
+    "corrupted_region_mae": 2.0770601690044392,
+    "clean_region_mse": 0.11156719121619604,
+    "clean_region_mae": 0.17134880983007625,
+    "baseline_mae": 0.0895935960591133,
+    "stv_mae": 0.09609065862726839,
+    "ltv_mae": 0.49212331631642126
+  },
+  {
+    "method": "GT-mask oracle",
+    "source_dir": "/home/yt/CTG_test/artifacts/results/denoising/multilabel_guided_denoising_clinical_gt",
+    "overall_mse": 0.12807508354438468,
+    "overall_mae": 0.21657066589310056,
+    "corrupted_region_mse": 8.914215335941181,
+    "corrupted_region_mae": 1.9886221527333974,
+    "clean_region_mse": 0.06182753443872388,
+    "clean_region_mae": 0.2032093872747462,
+    "baseline_mae": 0.06323891625615763,
+    "stv_mae": 0.14365389933265896,
+    "ltv_mae": 0.6943233885071168
+  }
+]
