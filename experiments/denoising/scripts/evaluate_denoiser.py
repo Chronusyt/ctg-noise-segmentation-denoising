@@ -28,6 +28,7 @@ for _path in (_REPO_ROOT, _SRC_ROOT):
         sys.path.insert(0, str(_path))
 
 from ctg_pipeline.models.unet1d_denoiser import UNet1DDenoiser
+from ctg_pipeline.evaluation.feature_preservation import FeatureConfig, summarize_feature_preservation
 from ctg_pipeline.utils.pathing import DENOISING_DATASETS_ROOT, DENOISING_RESULTS_ROOT, resolve_repo_path
 
 
@@ -246,6 +247,11 @@ def main():
     parser.add_argument("--n_vis", type=int, default=5)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
+        "--no_feature_preservation",
+        action="store_true",
+        help="跳过 baseline/STV/LTV feature-preservation 评估",
+    )
+    parser.add_argument(
         "--prefer_noisy",
         action="store_true",
         default=True,
@@ -294,6 +300,13 @@ def main():
 
     learned_overall = compute_metrics(reconstructed, clean, noise_mask)
     learned_per_sample, per_sample_dict = compute_per_sample(reconstructed, clean, noise_mask)
+    feature_metrics = {}
+    identity_feature_metrics = {}
+    if not args.no_feature_preservation:
+        print("计算 feature-preservation 指标（baseline/STV/LTV）...")
+        feature_config = FeatureConfig(sample_rate=4.0)
+        identity_feature_metrics = summarize_feature_preservation(identity_pred, clean, config=feature_config)
+        feature_metrics = summarize_feature_preservation(reconstructed, clean, config=feature_config)
 
     print("Overall:")
     for k, v in learned_overall.items():
@@ -301,16 +314,22 @@ def main():
     print("Per-sample 平均:")
     for k, v in learned_per_sample.items():
         print(f"  {k}: {v:.4f}")
+    if feature_metrics:
+        print("Feature-preservation:")
+        for k, v in feature_metrics.items():
+            print(f"  {k}: {v:.4f}")
 
     # ========== 保存指标 ==========
     results = {
         "identity_baseline": {
             "overall": identity_overall,
             "per_sample_mean": identity_per_sample,
+            "feature_preservation": identity_feature_metrics,
         },
         "learned_denoiser": {
             "overall": learned_overall,
             "per_sample_mean": learned_per_sample,
+            "feature_preservation": feature_metrics,
         },
     }
     txt_path = os.path.join(args.output_dir, "test_metrics.txt")
@@ -322,6 +341,10 @@ def main():
         f.write("Per-sample 平均:\n")
         for k, v in identity_per_sample.items():
             f.write(f"  {k}: {v:.4f}\n")
+        if identity_feature_metrics:
+            f.write("Feature-preservation:\n")
+            for k, v in identity_feature_metrics.items():
+                f.write(f"  {k}: {v:.4f}\n")
         f.write("\n========== Learned denoiser ==========\n")
         f.write("Overall:\n")
         for k, v in learned_overall.items():
@@ -329,6 +352,10 @@ def main():
         f.write("Per-sample 平均:\n")
         for k, v in learned_per_sample.items():
             f.write(f"  {k}: {v:.4f}\n")
+        if feature_metrics:
+            f.write("Feature-preservation:\n")
+            for k, v in feature_metrics.items():
+                f.write(f"  {k}: {v:.4f}\n")
     print(f"\n指标已保存到 {txt_path}")
 
     json_path = os.path.join(args.output_dir, "test_metrics.json")

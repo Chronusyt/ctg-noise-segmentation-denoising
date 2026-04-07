@@ -23,6 +23,7 @@ for _path in (_REPO_ROOT, _SRC_ROOT):
         sys.path.insert(0, str(_path))
 
 from ctg_pipeline.models.unet1d_mask_guided_denoiser import UNet1DMaskGuidedDenoiser
+from ctg_pipeline.evaluation.feature_preservation import FeatureConfig, summarize_feature_preservation
 from ctg_pipeline.utils.pathing import DENOISING_DATASETS_ROOT, DENOISING_RESULTS_ROOT, resolve_repo_path
 
 CLASS_NAMES = ["halving", "doubling", "mhr", "missing", "spike"]
@@ -262,6 +263,11 @@ def main():
     parser.add_argument("--device", type=str, default="")
     parser.add_argument("--n_vis", type=int, default=5)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--no_feature_preservation",
+        action="store_true",
+        help="跳过 baseline/STV/LTV feature-preservation 评估",
+    )
     parser.add_argument("--prefer_noisy", action="store_true", default=True)
     parser.add_argument("--no_prefer_noisy", action="store_true")
     args = parser.parse_args()
@@ -303,6 +309,14 @@ def main():
 
     overall = compute_metrics(reconstructed, clean, noise_mask)
     per_sample_mean, _ = compute_per_sample(reconstructed, clean, noise_mask)
+    feature_metrics = {}
+    if not args.no_feature_preservation:
+        print("计算 feature-preservation 指标（baseline/STV/LTV）...")
+        feature_metrics = summarize_feature_preservation(
+            reconstructed,
+            clean,
+            config=FeatureConfig(sample_rate=4.0),
+        )
 
     print("\n========== Mask-guided denoiser 评估 ==========")
     print("Overall:")
@@ -311,11 +325,16 @@ def main():
     print("Per-sample 平均:")
     for k, v in per_sample_mean.items():
         print(f"  {k}: {v:.4f}")
+    if feature_metrics:
+        print("Feature-preservation:")
+        for k, v in feature_metrics.items():
+            print(f"  {k}: {v:.4f}")
 
     results = {
         "mask_source": args.mask_source,
         "overall": overall,
         "per_sample_mean": per_sample_mean,
+        "feature_preservation": feature_metrics,
     }
     txt_path = os.path.join(args.output_dir, "test_metrics.txt")
     with open(txt_path, "w", encoding="utf-8") as f:
@@ -326,6 +345,10 @@ def main():
         f.write("Per-sample 平均:\n")
         for k, v in per_sample_mean.items():
             f.write(f"  {k}: {v:.4f}\n")
+        if feature_metrics:
+            f.write("Feature-preservation:\n")
+            for k, v in feature_metrics.items():
+                f.write(f"  {k}: {v:.4f}\n")
     print(f"\n指标已保存到 {txt_path}")
 
     json_path = os.path.join(args.output_dir, "test_metrics.json")
