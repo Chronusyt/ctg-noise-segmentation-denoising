@@ -1,0 +1,186 @@
+"""Compare physiological multitask v1 with existing clinical denoising baselines."""
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import math
+import os
+import sys
+from pathlib import Path
+
+_SCRIPT_DIR = Path(__file__).resolve().parent
+_REPO_ROOT = _SCRIPT_DIR.parents[2]
+_SRC_ROOT = _REPO_ROOT / "src"
+for _path in (_REPO_ROOT, _SRC_ROOT):
+    if str(_path) not in sys.path:
+        sys.path.insert(0, str(_path))
+
+from ctg_pipeline.utils.pathing import ARTIFACTS_ROOT, resolve_repo_path
+
+
+METRICS = [
+    "overall_mse",
+    "corrupted_region_mse",
+    "clean_region_mse",
+    "overall_mae",
+    "corrupted_region_mae",
+    "clean_region_mae",
+    "derived_baseline_mae",
+    "derived_stv_mae",
+    "derived_ltv_mae",
+    "derived_bv_mae",
+    "head_baseline_mae",
+    "head_stv_mae",
+    "head_ltv_mae",
+    "head_bv_mae",
+    "acc_f1",
+    "dec_f1",
+]
+
+
+def load_json(path: str) -> dict:
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def is_nan(value: object) -> bool:
+    return isinstance(value, float) and math.isnan(value)
+
+
+def fmt(value: object) -> str:
+    if value is None:
+        return "N/A"
+    if is_nan(value):
+        return "N/A"
+    if isinstance(value, (int, float)):
+        return f"{value:.4f}"
+    return str(value)
+
+
+def baseline_row(name: str, path: str, direct: bool = False) -> dict:
+    data = load_json(path)
+    if direct:
+        overall = data["learned_denoiser"].get("overall", {})
+        features = data["learned_denoiser"].get("feature_preservation", {})
+    else:
+        overall = data.get("overall", {})
+        features = data.get("feature_preservation", {})
+    return {
+        "method": name,
+        "source": path,
+        "overall_mse": overall.get("overall_mse"),
+        "corrupted_region_mse": overall.get("corrupted_region_mse"),
+        "clean_region_mse": overall.get("clean_region_mse"),
+        "overall_mae": overall.get("overall_mae"),
+        "corrupted_region_mae": overall.get("corrupted_region_mae"),
+        "clean_region_mae": overall.get("clean_region_mae"),
+        "derived_baseline_mae": features.get("baseline_mae"),
+        "derived_stv_mae": features.get("stv_mae"),
+        "derived_ltv_mae": features.get("ltv_mae"),
+        "derived_bv_mae": None,
+        "head_baseline_mae": None,
+        "head_stv_mae": None,
+        "head_ltv_mae": None,
+        "head_bv_mae": None,
+        "acc_f1": None,
+        "dec_f1": None,
+    }
+
+
+def multitask_row(path: str) -> dict:
+    data = load_json(path)
+    recon = data.get("reconstruction", {})
+    scalar = data.get("scalar_head", {})
+    derived = data.get("reconstructed_signal_derived_features", {})
+    events = data.get("event_prediction", {})
+    acc = events.get("acceleration", {})
+    dec = events.get("deceleration", {})
+    return {
+        "method": "Physiological multitask v1 no-mask",
+        "source": path,
+        "overall_mse": recon.get("overall_mse"),
+        "corrupted_region_mse": recon.get("corrupted_region_mse"),
+        "clean_region_mse": recon.get("clean_region_mse"),
+        "overall_mae": recon.get("overall_mae"),
+        "corrupted_region_mae": recon.get("corrupted_region_mae"),
+        "clean_region_mae": recon.get("clean_region_mae"),
+        "derived_baseline_mae": derived.get("baseline_mae"),
+        "derived_stv_mae": derived.get("stv_mae"),
+        "derived_ltv_mae": derived.get("ltv_mae"),
+        "derived_bv_mae": derived.get("bv_mae"),
+        "head_baseline_mae": scalar.get("baseline_mae"),
+        "head_stv_mae": scalar.get("stv_mae"),
+        "head_ltv_mae": scalar.get("ltv_mae"),
+        "head_bv_mae": scalar.get("bv_mae"),
+        "acc_f1": acc.get("f1"),
+        "dec_f1": dec.get("f1"),
+    }
+
+
+def write_markdown(path: str, rows: list[dict]) -> None:
+    headers = ["method", *METRICS]
+    lines = [
+        "| " + " | ".join(headers) + " |",
+        "| " + " | ".join(["---"] * len(headers)) + " |",
+    ]
+    for row in rows:
+        lines.append("| " + " | ".join([row["method"], *[fmt(row.get(key)) for key in METRICS]]) + " |")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Compare physiological multitask v1 with fixed clinical baselines")
+    parser.add_argument(
+        "--baseline_summary_dir",
+        type=str,
+        default=str(ARTIFACTS_ROOT / "results" / "summary" / "clinical_parallel_20260407_140308"),
+    )
+    parser.add_argument(
+        "--multitask_metrics",
+        type=str,
+        default=str(ARTIFACTS_ROOT / "results" / "physiological_multitask" / "clinical_v1_no_mask" / "eval" / "test_metrics.json"),
+    )
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        default=str(ARTIFACTS_ROOT / "results" / "physiological_multitask" / "clinical_v1_no_mask" / "comparison"),
+    )
+    parser.add_argument("--include_gt_oracle", action="store_true")
+    args = parser.parse_args()
+
+    baseline_dir = str(resolve_repo_path(args.baseline_summary_dir))
+    multitask_metrics = str(resolve_repo_path(args.multitask_metrics))
+    output_dir = str(resolve_repo_path(args.output_dir))
+    os.makedirs(output_dir, exist_ok=True)
+
+    rows = [
+        baseline_row("Direct denoising", os.path.join(baseline_dir, "direct_test_metrics.json"), direct=True),
+        baseline_row("Pred-mask guided denoising", os.path.join(baseline_dir, "pred_mask_test_metrics.json"), direct=False),
+    ]
+    if args.include_gt_oracle:
+        rows.append(baseline_row("GT-mask oracle denoising", os.path.join(baseline_dir, "gt_mask_test_metrics.json"), direct=False))
+    rows.append(multitask_row(multitask_metrics))
+
+    csv_path = os.path.join(output_dir, "physiological_multitask_comparison.csv")
+    with open(csv_path, "w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=["method", "source", *METRICS])
+        writer.writeheader()
+        writer.writerows(rows)
+
+    json_path = os.path.join(output_dir, "physiological_multitask_comparison.json")
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(rows, f, indent=2, ensure_ascii=False)
+
+    md_path = os.path.join(output_dir, "physiological_multitask_comparison.md")
+    write_markdown(md_path, rows)
+
+    print(f"Comparison saved to {csv_path}")
+    print(f"Markdown saved to {md_path}")
+    for row in rows:
+        print(row["method"], {key: fmt(row.get(key)) for key in METRICS})
+
+
+if __name__ == "__main__":
+    main()
