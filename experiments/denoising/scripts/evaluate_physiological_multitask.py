@@ -21,6 +21,7 @@ for _path in (_REPO_ROOT, _SRC_ROOT):
 
 from ctg_pipeline.features.physiology import FeatureConfig, compute_multitask_physiology_labels
 from ctg_pipeline.models.unet1d_physiological_multitask import UNet1DPhysiologicalMultitask
+from ctg_pipeline.utils.editing import build_edit_gate_torch, compute_region_masks_torch
 from ctg_pipeline.utils.pathing import ARTIFACTS_ROOT, DENOISING_DATASETS_ROOT, resolve_repo_path
 
 
@@ -56,6 +57,12 @@ def infer_input_mode(args: argparse.Namespace, ckpt: dict) -> str:
     return ckpt.get("config", {}).get("input_mode", "no_mask")
 
 
+def infer_gate_mode(args: argparse.Namespace, ckpt: dict) -> str:
+    if args.gate_mode:
+        return args.gate_mode
+    return ckpt.get("config", {}).get("gate_mode", "none")
+
+
 def make_model_from_checkpoint(ckpt: dict, input_mode: str) -> UNet1DPhysiologicalMultitask:
     config = ckpt.get("config", {})
     in_channels = int(config.get("in_channels", 6 if input_mode == "gt_mask" else 1))
@@ -84,6 +91,19 @@ def build_input_chunk(data: dict, start: int, end: int, input_mode: str) -> np.n
     raise ValueError(f"Unsupported input_mode: {input_mode}")
 
 
+def build_gate_chunk(data: dict, start: int, end: int, input_mode: str, gate_mode: str, ckpt_config: dict, device: str) -> torch.Tensor | None:
+    if input_mode != "gt_mask" or gate_mode == "none":
+        return None
+    mask = torch.from_numpy(np.transpose(data["masks"][start:end], (0, 2, 1)).astype(np.float32)).to(device)
+    return build_edit_gate_torch(
+        mask,
+        gate_mode=gate_mode,
+        clean_gate_value=float(ckpt_config.get("clean_gate_value", 0.1)),
+        dilation_radius=int(ckpt_config.get("gate_dilation_radius", 5)),
+        smooth_kernel_size=int(ckpt_config.get("gate_smooth_kernel", 5)),
+    )
+
+
 def predict(
     model: torch.nn.Module,
     data: dict,
@@ -91,6 +111,8 @@ def predict(
     device: str,
     batch_size: int,
     input_mode: str,
+    gate_mode: str,
+    ckpt_config: dict,
 ) -> dict:
     model.eval()
     preds = {
@@ -107,7 +129,8 @@ def predict(
         for start in range(0, n, batch_size):
             end = min(start + batch_size, n)
             x = torch.from_numpy(build_input_chunk(data, start, end, input_mode)).to(device)
-            out = model(x)
+            edit_gate = build_gate_chunk(data, start, end, input_mode, gate_mode, ckpt_config, device)
+            out = model(x, edit_gate=edit_gate)
             preds["reconstruction"].append(out["reconstruction"].cpu().numpy()[:, 0, :])
             preds["acc_logits"].append(out["acc_logits"].cpu().numpy()[:, 0, :])
             preds["dec_logits"].append(out["dec_logits"].cpu().numpy()[:, 0, :])
@@ -117,19 +140,34 @@ def predict(
     return {key: np.concatenate(value, axis=0) for key, value in preds.items()}
 
 
-def reconstruction_metrics(pred: np.ndarray, clean: np.ndarray, noise_mask: np.ndarray) -> Dict[str, float]:
+def masked_error_stats(pred: np.ndarray, target: np.ndarray, mask: np.ndarray, prefix: str) -> Dict[str, float]:
     pred = pred.astype(np.float64).ravel()
-    clean = clean.astype(np.float64).ravel()
-    noise_mask = noise_mask.astype(bool).ravel()
-    clean_mask = ~noise_mask
+    target = target.astype(np.float64).ravel()
+    mask = mask.astype(bool).ravel()
+    if not np.any(mask):
+        return {
+            f"{prefix}_mse": float("nan"),
+            f"{prefix}_mae": float("nan"),
+            f"{prefix}_ratio": float(mask.mean()),
+        }
+    diff = pred[mask] - target[mask]
     return {
-        "overall_mse": float(np.mean((pred - clean) ** 2)),
-        "overall_mae": float(np.mean(np.abs(pred - clean))),
-        "corrupted_region_mse": float(np.mean((pred[noise_mask] - clean[noise_mask]) ** 2)) if np.any(noise_mask) else float("nan"),
-        "corrupted_region_mae": float(np.mean(np.abs(pred[noise_mask] - clean[noise_mask]))) if np.any(noise_mask) else float("nan"),
-        "clean_region_mse": float(np.mean((pred[clean_mask] - clean[clean_mask]) ** 2)) if np.any(clean_mask) else float("nan"),
-        "clean_region_mae": float(np.mean(np.abs(pred[clean_mask] - clean[clean_mask]))) if np.any(clean_mask) else float("nan"),
+        f"{prefix}_mse": float(np.mean(diff**2)),
+        f"{prefix}_mae": float(np.mean(np.abs(diff))),
+        f"{prefix}_ratio": float(mask.mean()),
     }
+
+
+def reconstruction_metrics(pred: np.ndarray, clean: np.ndarray, region_masks: Dict[str, np.ndarray]) -> Dict[str, float]:
+    out = {
+        "overall_mse": float(np.mean((pred.astype(np.float64) - clean.astype(np.float64)) ** 2)),
+        "overall_mae": float(np.mean(np.abs(pred.astype(np.float64) - clean.astype(np.float64)))),
+    }
+    out.update(masked_error_stats(pred, clean, region_masks["corrupted"], "corrupted_region"))
+    out.update(masked_error_stats(pred, clean, region_masks["clean"], "clean_region"))
+    out.update(masked_error_stats(pred, clean, region_masks["boundary_near_clean"], "boundary_near_clean"))
+    out.update(masked_error_stats(pred, clean, region_masks["far_clean"], "far_from_mask_clean"))
+    return out
 
 
 def binary_metrics(logits: np.ndarray, labels: np.ndarray, threshold: float) -> Dict[str, float]:
@@ -219,7 +257,9 @@ def plot_visualizations(
     derived: dict | None,
     save_dir: str,
     indices: np.ndarray,
-    threshold: float,
+    acc_threshold: float,
+    dec_threshold: float,
+    gate_mode: str,
 ) -> None:
     if indices.size == 0:
         return
@@ -258,7 +298,7 @@ def plot_visualizations(
 
         axes[1].plot(x, data["acc_labels"][idx], "g-", linewidth=1.0, label="acc GT")
         axes[1].plot(x, acc_prob[idx], "b-", linewidth=0.9, label="acc pred prob")
-        axes[1].axhline(threshold, color="gray", linestyle="--", linewidth=0.8)
+        axes[1].axhline(acc_threshold, color="gray", linestyle="--", linewidth=0.8)
         axes[1].set_ylim(-0.05, 1.05)
         axes[1].legend(loc="upper right", fontsize=8)
         axes[1].set_ylabel("ACC")
@@ -266,7 +306,7 @@ def plot_visualizations(
 
         axes[2].plot(x, data["dec_labels"][idx], "g-", linewidth=1.0, label="dec GT")
         axes[2].plot(x, dec_prob[idx], "b-", linewidth=0.9, label="dec pred prob")
-        axes[2].axhline(threshold, color="gray", linestyle="--", linewidth=0.8)
+        axes[2].axhline(dec_threshold, color="gray", linestyle="--", linewidth=0.8)
         axes[2].set_ylim(-0.05, 1.05)
         axes[2].legend(loc="upper right", fontsize=8)
         axes[2].set_ylabel("DEC")
@@ -280,6 +320,7 @@ def plot_visualizations(
                 f"{derived['ltv'][idx]:.2f} / {derived['baseline_variability'][idx]:.2f}"
             )
         scalar_text = (
+            f"gate_mode: {gate_mode}\n"
             f"head baseline GT/pred: {data['baseline_labels'][idx]:.2f} / {preds['baseline'][idx]:.2f}\n"
             f"head STV GT/pred: {data['stv_labels'][idx]:.2f} / {preds['stv'][idx]:.2f}\n"
             f"head LTV GT/pred: {data['ltv_labels'][idx]:.2f} / {preds['ltv'][idx]:.2f}\n"
@@ -341,8 +382,35 @@ def write_outputs(output_dir: str, results: dict) -> None:
     print(f"Metrics saved to {json_path}, {txt_path}, {csv_path}")
 
 
+def write_boundary_report(output_dir: str, reconstruction: dict, boundary_k: int) -> None:
+    diagnostics_dir = os.path.join(output_dir, "diagnostics")
+    os.makedirs(diagnostics_dir, exist_ok=True)
+    txt_path = os.path.join(diagnostics_dir, "boundary_error_report.txt")
+    json_path = os.path.join(diagnostics_dir, "boundary_error_report.json")
+    report = {
+        "boundary_k": int(boundary_k),
+        "clean_region_mse": reconstruction.get("clean_region_mse"),
+        "clean_region_mae": reconstruction.get("clean_region_mae"),
+        "boundary_near_clean_mse": reconstruction.get("boundary_near_clean_mse"),
+        "boundary_near_clean_mae": reconstruction.get("boundary_near_clean_mae"),
+        "far_from_mask_clean_mse": reconstruction.get("far_from_mask_clean_mse"),
+        "far_from_mask_clean_mae": reconstruction.get("far_from_mask_clean_mae"),
+        "clean_region_ratio": reconstruction.get("clean_region_ratio"),
+        "boundary_near_clean_ratio": reconstruction.get("boundary_near_clean_ratio"),
+        "far_from_mask_clean_ratio": reconstruction.get("far_from_mask_clean_ratio"),
+    }
+    with open(txt_path, "w", encoding="utf-8") as f:
+        f.write("Boundary Error Report\n")
+        f.write("=====================\n")
+        for key, value in report.items():
+            f.write(f"{key}: {value}\n")
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(report, f, indent=2, ensure_ascii=False)
+    print(f"Boundary diagnostics saved to {txt_path}", flush=True)
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Evaluate physiological multitask model (v1 no-mask / v2 gt-mask auxiliary)")
+    parser = argparse.ArgumentParser(description="Evaluate physiological multitask model")
     parser.add_argument(
         "--data_dir",
         type=str,
@@ -362,10 +430,14 @@ def main() -> None:
     parser.add_argument("--device", type=str, default="")
     parser.add_argument("--batch_size", type=int, default=256)
     parser.add_argument("--threshold", type=float, default=0.5)
+    parser.add_argument("--acc_threshold", type=float, default=-1.0)
+    parser.add_argument("--dec_threshold", type=float, default=-1.0)
     parser.add_argument("--max_samples", type=int, default=0, help="Debug only; 0 means full split")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--n_vis", type=int, default=5)
     parser.add_argument("--input_mode", choices=["no_mask", "gt_mask"], default="")
+    parser.add_argument("--gate_mode", choices=["none", "union_soft", "union_dilated_soft"], default="")
+    parser.add_argument("--boundary_k", type=int, default=-1)
     parser.add_argument("--no_derived_features", action="store_true")
     parser.add_argument("--derived_chunk_size", type=int, default=4096)
     args = parser.parse_args()
@@ -381,18 +453,32 @@ def main() -> None:
     print(f"Loaded split={args.split}, samples={data['noisy_signals'].shape[0]}", flush=True)
 
     ckpt = torch.load(args.model_path, map_location=device)
-    label_stats = ckpt.get("label_stats") or ckpt.get("config", {}).get("label_stats")
+    ckpt_config = ckpt.get("config", {})
+    label_stats = ckpt.get("label_stats") or ckpt_config.get("label_stats")
     if label_stats is None:
         raise KeyError("Checkpoint missing label_stats")
     input_mode = infer_input_mode(args, ckpt)
+    gate_mode = infer_gate_mode(args, ckpt)
+    boundary_k = args.boundary_k if args.boundary_k >= 0 else int(ckpt_config.get("boundary_k", 5))
+    acc_threshold = args.acc_threshold if args.acc_threshold >= 0 else args.threshold
+    dec_threshold = args.dec_threshold if args.dec_threshold >= 0 else args.threshold
     print(f"输入模式: {input_mode}", flush=True)
+    print(f"gate 模式: {gate_mode}", flush=True)
+    print(f"boundary_k: {boundary_k}", flush=True)
+    print(f"thresholds: acc={acc_threshold}, dec={dec_threshold}", flush=True)
 
     model = make_model_from_checkpoint(ckpt, input_mode=input_mode)
     model.load_state_dict(ckpt["model_state_dict"] if "model_state_dict" in ckpt else ckpt)
     model = model.to(device)
 
-    preds = predict(model, data, label_stats, device, args.batch_size, input_mode=input_mode)
-    noise_mask = (data["artifact_labels"] > 0.5).any(axis=-1)
+    preds = predict(model, data, label_stats, device, args.batch_size, input_mode=input_mode, gate_mode=gate_mode, ckpt_config=ckpt_config)
+
+    region_masks_torch = compute_region_masks_torch(
+        torch.from_numpy(np.transpose(data["masks"], (0, 2, 1)).astype(np.float32)),
+        boundary_k=boundary_k,
+    )
+    region_masks = {key: value.numpy()[:, 0, :] for key, value in region_masks_torch.items()}
+
     results = {
         "metadata": {
             "model_path": args.model_path,
@@ -400,12 +486,14 @@ def main() -> None:
             "split": args.split,
             "n_samples": int(data["noisy_signals"].shape[0]),
             "input_mode": input_mode,
-            "model_variant": ckpt.get("config", {}).get("model_variant", ""),
+            "gate_mode": gate_mode,
+            "boundary_k": boundary_k,
+            "model_variant": ckpt_config.get("model_variant", ""),
         },
-        "reconstruction": reconstruction_metrics(preds["reconstruction"], data["clean_signals"], noise_mask),
+        "reconstruction": reconstruction_metrics(preds["reconstruction"], data["clean_signals"], region_masks),
         "event_prediction": {
-            "acceleration": binary_metrics(preds["acc_logits"], data["acc_labels"], args.threshold),
-            "deceleration": binary_metrics(preds["dec_logits"], data["dec_labels"], args.threshold),
+            "acceleration": binary_metrics(preds["acc_logits"], data["acc_labels"], acc_threshold),
+            "deceleration": binary_metrics(preds["dec_logits"], data["dec_labels"], dec_threshold),
         },
         "scalar_head": scalar_metrics(preds, data),
     }
@@ -419,8 +507,18 @@ def main() -> None:
         results["reconstructed_signal_derived_features"] = {}
 
     write_outputs(args.output_dir, results)
+    write_boundary_report(args.output_dir, results["reconstruction"], boundary_k=boundary_k)
     vis_indices = choose_visual_indices(data, args.n_vis, args.seed)
-    plot_visualizations(data, preds, derived, os.path.join(args.output_dir, "figures"), vis_indices, args.threshold)
+    plot_visualizations(
+        data,
+        preds,
+        derived,
+        os.path.join(args.output_dir, "figures"),
+        vis_indices,
+        acc_threshold,
+        dec_threshold,
+        gate_mode=gate_mode,
+    )
 
 
 if __name__ == "__main__":

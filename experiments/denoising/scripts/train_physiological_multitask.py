@@ -24,6 +24,7 @@ for _path in (_REPO_ROOT, _SRC_ROOT):
 
 from ctg_pipeline.data.multitask_dataset import ClinicalMultitaskDataset
 from ctg_pipeline.models.unet1d_physiological_multitask import UNet1DPhysiologicalMultitask
+from ctg_pipeline.utils.editing import build_edit_gate_torch, compute_region_masks_torch
 from ctg_pipeline.utils.pathing import ARTIFACTS_ROOT, DENOISING_DATASETS_ROOT, resolve_repo_path
 
 
@@ -91,11 +92,17 @@ def build_model_input(batch: dict, device: str, input_mode: str) -> torch.Tensor
     raise ValueError(f"Unsupported input_mode: {input_mode}")
 
 
-def build_corrupted_region_mask(batch: dict, device: str) -> torch.Tensor:
+def build_edit_gate(batch: dict, device: str, input_mode: str, args: argparse.Namespace) -> torch.Tensor | None:
+    if input_mode != "gt_mask" or args.gate_mode == "none":
+        return None
     mask = batch["mask"].to(device)
-    if mask.ndim != 3:
-        raise ValueError(f"Expected mask shape [B, 5, L], got {mask.shape}")
-    return mask.amax(dim=1, keepdim=True).clamp(0.0, 1.0)
+    return build_edit_gate_torch(
+        mask,
+        gate_mode=args.gate_mode,
+        clean_gate_value=args.clean_gate_value,
+        dilation_radius=args.gate_dilation_radius,
+        smooth_kernel_size=args.gate_smooth_kernel,
+    )
 
 
 def pointwise_reconstruction_loss(pred: torch.Tensor, target: torch.Tensor, kind: str) -> torch.Tensor:
@@ -121,31 +128,48 @@ def masked_mean(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     return (values * mask).sum() / denom
 
 
-def selective_reconstruction_terms(
-    pred: torch.Tensor,
-    target: torch.Tensor,
-    corrupted_mask: torch.Tensor,
-    kind: str,
-    mode: str,
-    lambda_corrupt: float,
-    lambda_clean: float,
+def reconstruction_terms(
+    reconstruction: torch.Tensor,
+    clean: torch.Tensor,
+    noisy: torch.Tensor,
+    region_masks: Dict[str, torch.Tensor],
+    args: argparse.Namespace,
 ) -> Dict[str, torch.Tensor]:
-    pointwise = pointwise_reconstruction_loss(pred, target, kind)
-    clean_mask = 1.0 - corrupted_mask
-    recon_corrupt = masked_mean(pointwise, corrupted_mask)
-    recon_clean = masked_mean(pointwise, clean_mask)
+    recon_pointwise = pointwise_reconstruction_loss(reconstruction, clean, args.reconstruction_loss)
+    identity_pointwise = pointwise_reconstruction_loss(reconstruction, noisy, args.reconstruction_loss)
 
-    if mode == "overall":
-        recon_total = pointwise.mean()
-    elif mode == "selective":
-        recon_total = lambda_corrupt * recon_corrupt + lambda_clean * recon_clean
+    recon_global = recon_pointwise.mean()
+    recon_corrupt = masked_mean(recon_pointwise, region_masks["corrupted"])
+    recon_clean = masked_mean(recon_pointwise, region_masks["clean"])
+
+    if args.identity_region == "all_clean":
+        identity_mask = region_masks["clean"]
+    elif args.identity_region == "far_clean":
+        identity_mask = region_masks["far_clean"]
     else:
-        raise ValueError(f"Unknown reconstruction_mode: {mode}")
+        raise ValueError(f"Unsupported identity_region: {args.identity_region}")
+    identity_clean = masked_mean(identity_pointwise, identity_mask)
+
+    if args.reconstruction_mode == "overall":
+        recon_total = recon_global
+    elif args.reconstruction_mode == "selective":
+        recon_total = args.lambda_corrupt * recon_corrupt + args.lambda_clean * recon_clean
+    elif args.reconstruction_mode == "hybrid":
+        recon_total = (
+            args.lambda_global * recon_global
+            + args.lambda_corrupt * recon_corrupt
+            + args.lambda_clean * recon_clean
+            + args.lambda_identity * identity_clean
+        )
+    else:
+        raise ValueError(f"Unknown reconstruction_mode: {args.reconstruction_mode}")
 
     return {
         "reconstruction": recon_total,
+        "recon_global": recon_global,
         "recon_corrupt": recon_corrupt,
         "recon_clean": recon_clean,
+        "identity_clean": identity_clean,
     }
 
 
@@ -190,20 +214,13 @@ def compute_losses(
     dec_loss_fn: nn.Module,
     args: argparse.Namespace,
 ) -> Dict[str, torch.Tensor]:
+    noisy = batch["noisy_signal"].to(device)
     clean = batch["clean_signal"].to(device)
     acc_label = batch["acc_label"].to(device)
     dec_label = batch["dec_label"].to(device)
-    corrupted_mask = build_corrupted_region_mask(batch, device)
+    region_masks = compute_region_masks_torch(batch["mask"].to(device), boundary_k=args.boundary_k)
 
-    losses = selective_reconstruction_terms(
-        outputs["reconstruction"],
-        clean,
-        corrupted_mask,
-        kind=args.reconstruction_loss,
-        mode=args.reconstruction_mode,
-        lambda_corrupt=args.lambda_corrupt,
-        lambda_clean=args.lambda_clean,
-    )
+    losses = reconstruction_terms(outputs["reconstruction"], clean, noisy, region_masks, args)
     losses.update(
         {
             "acc": acc_loss_fn(outputs["acc_logits"], acc_label),
@@ -249,8 +266,10 @@ def run_epoch(
     totals = {
         "total": 0.0,
         "reconstruction": 0.0,
+        "recon_global": 0.0,
         "recon_corrupt": 0.0,
         "recon_clean": 0.0,
+        "identity_clean": 0.0,
         "acc": 0.0,
         "dec": 0.0,
         "baseline": 0.0,
@@ -262,10 +281,11 @@ def run_epoch(
 
     for batch in loader:
         x = build_model_input(batch, device, args.input_mode)
+        edit_gate = build_edit_gate(batch, device, args.input_mode, args)
         if is_train:
             optimizer.zero_grad(set_to_none=True)
         with torch.set_grad_enabled(is_train):
-            outputs = model(x)
+            outputs = model(x, edit_gate=edit_gate)
             losses = compute_losses(outputs, batch, device, label_stats, acc_loss_fn, dec_loss_fn, args)
             if is_train:
                 losses["total"].backward()
@@ -288,8 +308,10 @@ def write_train_log_header(path: str) -> None:
                 "lr",
                 "train_total",
                 "train_recon_total",
+                "train_recon_global",
                 "train_recon_corrupt",
                 "train_recon_clean",
+                "train_identity_clean",
                 "train_acc",
                 "train_dec",
                 "train_baseline",
@@ -298,8 +320,10 @@ def write_train_log_header(path: str) -> None:
                 "train_bv",
                 "val_total",
                 "val_recon_total",
+                "val_recon_global",
                 "val_recon_corrupt",
                 "val_recon_clean",
+                "val_identity_clean",
                 "val_acc",
                 "val_dec",
                 "val_baseline",
@@ -319,8 +343,10 @@ def append_train_log(path: str, epoch: int, lr: float, train: dict, val: dict) -
                 lr,
                 train["total"],
                 train["reconstruction"],
+                train["recon_global"],
                 train["recon_corrupt"],
                 train["recon_clean"],
+                train["identity_clean"],
                 train["acc"],
                 train["dec"],
                 train["baseline"],
@@ -329,8 +355,10 @@ def append_train_log(path: str, epoch: int, lr: float, train: dict, val: dict) -
                 train["baseline_variability"],
                 val["total"],
                 val["reconstruction"],
+                val["recon_global"],
                 val["recon_corrupt"],
                 val["recon_clean"],
+                val["identity_clean"],
                 val["acc"],
                 val["dec"],
                 val["baseline"],
@@ -341,8 +369,16 @@ def append_train_log(path: str, epoch: int, lr: float, train: dict, val: dict) -
         )
 
 
+def infer_model_variant(args: argparse.Namespace) -> str:
+    if args.input_mode == "no_mask":
+        return "physiological_multitask_v1_no_mask"
+    if args.gate_mode == "none":
+        return "physiological_multitask_v2_gt_mask_aux"
+    return "physiological_multitask_v2_2_gt_mask_constrained_editing"
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Train physiological multitask model (v1 no-mask / v2 gt-mask auxiliary)")
+    parser = argparse.ArgumentParser(description="Train physiological multitask model")
     parser.add_argument(
         "--data_dir",
         type=str,
@@ -354,6 +390,12 @@ def main() -> None:
         default=str(ARTIFACTS_ROOT / "results" / "physiological_multitask" / "clinical_v1_no_mask"),
     )
     parser.add_argument("--input_mode", choices=["no_mask", "gt_mask"], default="no_mask")
+    parser.add_argument("--gate_mode", choices=["none", "union_soft", "union_dilated_soft"], default="none")
+    parser.add_argument("--clean_gate_value", type=float, default=0.1)
+    parser.add_argument("--gate_dilation_radius", type=int, default=5)
+    parser.add_argument("--gate_smooth_kernel", type=int, default=5)
+    parser.add_argument("--identity_region", choices=["all_clean", "far_clean"], default="far_clean")
+    parser.add_argument("--boundary_k", type=int, default=5)
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=1e-3)
@@ -371,9 +413,11 @@ def main() -> None:
         help="Disable reconstruction = noisy + residual output",
     )
     parser.add_argument("--reconstruction_loss", choices=["mse", "smooth_l1"], default="smooth_l1")
-    parser.add_argument("--reconstruction_mode", choices=["overall", "selective"], default="overall")
+    parser.add_argument("--reconstruction_mode", choices=["overall", "selective", "hybrid"], default="overall")
+    parser.add_argument("--lambda_global", type=float, default=1.0)
     parser.add_argument("--lambda_corrupt", type=float, default=3.0)
     parser.add_argument("--lambda_clean", type=float, default=1.0)
+    parser.add_argument("--lambda_identity", type=float, default=0.5)
     parser.add_argument("--scalar_loss", choices=["mse", "smooth_l1"], default="smooth_l1")
     parser.add_argument("--acc_event_loss", choices=["bce", "focal"], default="bce")
     parser.add_argument("--dec_event_loss", choices=["bce", "focal"], default="bce")
@@ -406,7 +450,10 @@ def main() -> None:
     print("Physiological multitask 训练启动", flush=True)
     print(f"使用设备: {device}", flush=True)
     print(f"输入模式: {args.input_mode}", flush=True)
+    print(f"gate 模式: {args.gate_mode}", flush=True)
     print(f"重建模式: {args.reconstruction_mode}", flush=True)
+    print(f"identity region: {args.identity_region}", flush=True)
+    print(f"boundary_k: {args.boundary_k}", flush=True)
     print(f"事件损失: acc={args.acc_event_loss}, dec={args.dec_event_loss}", flush=True)
     print(f"数据目录: {args.data_dir}", flush=True)
 
@@ -425,14 +472,8 @@ def main() -> None:
     acc_pos_weight = args.acc_pos_weight if args.acc_pos_weight > 0 else compute_pos_weight(train_full.acc_labels, args.max_pos_weight)
     dec_pos_weight = args.dec_pos_weight if args.dec_pos_weight > 0 else compute_pos_weight(train_full.dec_labels, args.max_pos_weight)
     print(f"scalar label stats: {label_stats}", flush=True)
-    print(
-        f"event 正样本比例: acc={acc_positive_ratio:.6f}, dec={dec_positive_ratio:.6f}",
-        flush=True,
-    )
-    print(
-        f"event pos_weight: acc={acc_pos_weight:.4f}, dec={dec_pos_weight:.4f}",
-        flush=True,
-    )
+    print(f"event 正样本比例: acc={acc_positive_ratio:.6f}, dec={dec_positive_ratio:.6f}", flush=True)
+    print(f"event pos_weight: acc={acc_pos_weight:.4f}, dec={dec_pos_weight:.4f}", flush=True)
 
     train_loader = DataLoader(
         train_ds,
@@ -475,7 +516,7 @@ def main() -> None:
         device=device,
     )
 
-    model_variant = "physiological_multitask_v1_no_mask" if args.input_mode == "no_mask" else "physiological_multitask_v2_gt_mask_aux"
+    model_variant = infer_model_variant(args)
     config = vars(args).copy()
     config.update(
         {
@@ -515,15 +556,17 @@ def main() -> None:
             f"Epoch {epoch}: "
             f"train_total={train_metrics['total']:.4f}, "
             f"train_recon_total={train_metrics['reconstruction']:.4f}, "
+            f"train_recon_global={train_metrics['recon_global']:.4f}, "
             f"train_recon_corrupt={train_metrics['recon_corrupt']:.4f}, "
             f"train_recon_clean={train_metrics['recon_clean']:.4f}, "
+            f"train_identity_clean={train_metrics['identity_clean']:.4f}, "
             f"train_acc={train_metrics['acc']:.4f}, train_dec={train_metrics['dec']:.4f}, "
-            f"train_baseline={train_metrics['baseline']:.4f}, train_stv={train_metrics['stv']:.4f}, "
-            f"train_ltv={train_metrics['ltv']:.4f}, train_bv={train_metrics['baseline_variability']:.4f}, "
             f"val_total={val_metrics['total']:.4f}, "
             f"val_recon_total={val_metrics['reconstruction']:.4f}, "
+            f"val_recon_global={val_metrics['recon_global']:.4f}, "
             f"val_recon_corrupt={val_metrics['recon_corrupt']:.4f}, "
             f"val_recon_clean={val_metrics['recon_clean']:.4f}, "
+            f"val_identity_clean={val_metrics['identity_clean']:.4f}, "
             f"val_acc={val_metrics['acc']:.4f}, val_dec={val_metrics['dec']:.4f}, "
             f"val_baseline={val_metrics['baseline']:.4f}, val_stv={val_metrics['stv']:.4f}, "
             f"val_ltv={val_metrics['ltv']:.4f}, val_bv={val_metrics['baseline_variability']:.4f}"
@@ -564,10 +607,14 @@ def main() -> None:
         val_total=np.asarray([h["val"]["total"] for h in history], dtype=np.float32),
         train_recon_total=np.asarray([h["train"]["reconstruction"] for h in history], dtype=np.float32),
         val_recon_total=np.asarray([h["val"]["reconstruction"] for h in history], dtype=np.float32),
+        train_recon_global=np.asarray([h["train"]["recon_global"] for h in history], dtype=np.float32),
+        val_recon_global=np.asarray([h["val"]["recon_global"] for h in history], dtype=np.float32),
         train_recon_corrupt=np.asarray([h["train"]["recon_corrupt"] for h in history], dtype=np.float32),
         val_recon_corrupt=np.asarray([h["val"]["recon_corrupt"] for h in history], dtype=np.float32),
         train_recon_clean=np.asarray([h["train"]["recon_clean"] for h in history], dtype=np.float32),
         val_recon_clean=np.asarray([h["val"]["recon_clean"] for h in history], dtype=np.float32),
+        train_identity_clean=np.asarray([h["train"]["identity_clean"] for h in history], dtype=np.float32),
+        val_identity_clean=np.asarray([h["val"]["identity_clean"] for h in history], dtype=np.float32),
     )
     print(f"训练完成，输出目录: {args.output_dir}", flush=True)
 

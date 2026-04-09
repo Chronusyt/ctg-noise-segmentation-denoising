@@ -23,9 +23,13 @@ METRICS = [
     "overall_mse",
     "corrupted_region_mse",
     "clean_region_mse",
+    "boundary_near_clean_mse",
+    "far_from_mask_clean_mse",
     "overall_mae",
     "corrupted_region_mae",
     "clean_region_mae",
+    "boundary_near_clean_mae",
+    "far_from_mask_clean_mae",
     "derived_baseline_mae",
     "derived_stv_mae",
     "derived_ltv_mae",
@@ -72,9 +76,13 @@ def baseline_row(name: str, path: str, direct: bool = False) -> dict:
         "overall_mse": overall.get("overall_mse"),
         "corrupted_region_mse": overall.get("corrupted_region_mse"),
         "clean_region_mse": overall.get("clean_region_mse"),
+        "boundary_near_clean_mse": None,
+        "far_from_mask_clean_mse": None,
         "overall_mae": overall.get("overall_mae"),
         "corrupted_region_mae": overall.get("corrupted_region_mae"),
         "clean_region_mae": overall.get("clean_region_mae"),
+        "boundary_near_clean_mae": None,
+        "far_from_mask_clean_mae": None,
         "derived_baseline_mae": features.get("baseline_mae"),
         "derived_stv_mae": features.get("stv_mae"),
         "derived_ltv_mae": features.get("ltv_mae"),
@@ -92,7 +100,10 @@ def infer_multitask_label(data: dict) -> str:
     metadata = data.get("metadata", {})
     model_variant = metadata.get("model_variant", "")
     input_mode = metadata.get("input_mode", "")
-    if model_variant == "physiological_multitask_v2_gt_mask_aux" or input_mode == "gt_mask":
+    gate_mode = metadata.get("gate_mode", "none")
+    if model_variant == "physiological_multitask_v2_2_gt_mask_constrained_editing":
+        return "Physiological multitask v2.2 (gt-mask constrained editing)"
+    if model_variant == "physiological_multitask_v2_gt_mask_aux" or (input_mode == "gt_mask" and gate_mode == "none"):
         return "Physiological multitask v2 (gt-mask auxiliary)"
     if model_variant == "physiological_multitask_v1_no_mask" or input_mode == "no_mask":
         return "Physiological multitask v1 no-mask"
@@ -113,9 +124,13 @@ def multitask_row(path: str, label: str | None = None) -> dict:
         "overall_mse": recon.get("overall_mse"),
         "corrupted_region_mse": recon.get("corrupted_region_mse"),
         "clean_region_mse": recon.get("clean_region_mse"),
+        "boundary_near_clean_mse": recon.get("boundary_near_clean_mse"),
+        "far_from_mask_clean_mse": recon.get("far_from_mask_clean_mse"),
         "overall_mae": recon.get("overall_mae"),
         "corrupted_region_mae": recon.get("corrupted_region_mae"),
         "clean_region_mae": recon.get("clean_region_mae"),
+        "boundary_near_clean_mae": recon.get("boundary_near_clean_mae"),
+        "far_from_mask_clean_mae": recon.get("far_from_mask_clean_mae"),
         "derived_baseline_mae": derived.get("baseline_mae"),
         "derived_stv_mae": derived.get("stv_mae"),
         "derived_ltv_mae": derived.get("ltv_mae"),
@@ -127,6 +142,16 @@ def multitask_row(path: str, label: str | None = None) -> dict:
         "acc_f1": acc.get("f1"),
         "dec_f1": dec.get("f1"),
     }
+
+
+def maybe_add_multitask(rows: list[dict], path: str, label: str | None = None) -> None:
+    if not path:
+        return
+    resolved = str(resolve_repo_path(path))
+    if not os.path.isfile(resolved):
+        print(f"Skip missing multitask metrics: {resolved}")
+        return
+    rows.append(multitask_row(resolved, label=label))
 
 
 def write_markdown(path: str, rows: list[dict]) -> None:
@@ -149,21 +174,29 @@ def main() -> None:
         default=str(ARTIFACTS_ROOT / "results" / "summary" / "clinical_parallel_20260407_140308"),
     )
     parser.add_argument(
-        "--multitask_metrics",
+        "--v1_metrics",
         type=str,
         default=str(ARTIFACTS_ROOT / "results" / "physiological_multitask" / "clinical_v1_no_mask" / "eval" / "test_metrics.json"),
     )
     parser.add_argument(
+        "--v2_metrics",
+        type=str,
+        default=str(ARTIFACTS_ROOT / "results" / "physiological_multitask" / "clinical_v2_gt_mask_selective" / "eval" / "test_metrics.json"),
+    )
+    parser.add_argument(
+        "--v2_2_metrics",
+        type=str,
+        default=str(ARTIFACTS_ROOT / "results" / "physiological_multitask" / "clinical_v2_2_gt_mask_constrained" / "eval" / "test_metrics.json"),
+    )
+    parser.add_argument(
         "--output_dir",
         type=str,
-        default=str(ARTIFACTS_ROOT / "results" / "physiological_multitask" / "clinical_v1_no_mask" / "comparison"),
+        default=str(ARTIFACTS_ROOT / "results" / "physiological_multitask" / "comparison"),
     )
     parser.add_argument("--include_gt_oracle", action="store_true")
-    parser.add_argument("--multitask_label", type=str, default="")
     args = parser.parse_args()
 
     baseline_dir = str(resolve_repo_path(args.baseline_summary_dir))
-    multitask_metrics = str(resolve_repo_path(args.multitask_metrics))
     output_dir = str(resolve_repo_path(args.output_dir))
     os.makedirs(output_dir, exist_ok=True)
 
@@ -173,7 +206,10 @@ def main() -> None:
     ]
     if args.include_gt_oracle:
         rows.append(baseline_row("GT-mask oracle denoising", os.path.join(baseline_dir, "gt_mask_test_metrics.json"), direct=False))
-    rows.append(multitask_row(multitask_metrics, label=args.multitask_label or None))
+
+    maybe_add_multitask(rows, args.v1_metrics, label="Physiological multitask v1 no-mask")
+    maybe_add_multitask(rows, args.v2_metrics, label="Physiological multitask v2 (gt-mask auxiliary)")
+    maybe_add_multitask(rows, args.v2_2_metrics, label="Physiological multitask v2.2 (gt-mask constrained editing)")
 
     csv_path = os.path.join(output_dir, "physiological_multitask_comparison.csv")
     with open(csv_path, "w", encoding="utf-8", newline="") as f:

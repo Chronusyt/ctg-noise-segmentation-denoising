@@ -95,7 +95,7 @@ class UNet1DPhysiologicalMultitask(nn.Module):
         self.ltv_head = ScalarRegressionHead(bottleneck_ch, scalar_hidden_channels, dropout)
         self.baseline_variability_head = ScalarRegressionHead(bottleneck_ch, scalar_hidden_channels, dropout)
 
-    def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
+    def forward(self, x: torch.Tensor, edit_gate: torch.Tensor | None = None) -> Dict[str, torch.Tensor]:
         skips = []
         h = x
         for i, block in enumerate(self.enc):
@@ -115,12 +115,16 @@ class UNet1DPhysiologicalMultitask(nn.Module):
             h = torch.cat([h, s], dim=1)
             h = block(h)
 
-        reconstruction = self.reconstruction_head(h)
+        residual = self.reconstruction_head(h)
+        gated_residual = residual if edit_gate is None else residual * edit_gate
+        reconstruction = gated_residual
         if self.residual_reconstruction:
             reconstruction = reconstruction + x[:, :1, :]
 
         return {
             "reconstruction": reconstruction,
+            "raw_residual": residual,
+            "gated_residual": gated_residual,
             "acc_logits": self.acceleration_head(h),
             "dec_logits": self.deceleration_head(h),
             "baseline": self.baseline_head(bottleneck),
@@ -134,8 +138,11 @@ def _test() -> None:
     for in_channels in (1, 6):
         model = UNet1DPhysiologicalMultitask(in_channels=in_channels, base_channels=32, depth=3)
         x = torch.randn(4, in_channels, 240)
-        y = model(x)
+        gate = torch.rand(4, 1, 240) if in_channels == 6 else None
+        y = model(x, edit_gate=gate)
         assert y["reconstruction"].shape == (4, 1, 240)
+        assert y["raw_residual"].shape == (4, 1, 240)
+        assert y["gated_residual"].shape == (4, 1, 240)
         assert y["acc_logits"].shape == (4, 1, 240)
         assert y["dec_logits"].shape == (4, 1, 240)
         for key in ("baseline", "stv", "ltv", "baseline_variability"):
