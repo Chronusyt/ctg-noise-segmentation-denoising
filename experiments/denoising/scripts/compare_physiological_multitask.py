@@ -1,4 +1,4 @@
-"""Compare physiological multitask v1 with existing clinical denoising baselines."""
+"""Compare physiological multitask models with fixed clinical denoising baselines."""
 from __future__ import annotations
 
 import argparse
@@ -88,7 +88,18 @@ def baseline_row(name: str, path: str, direct: bool = False) -> dict:
     }
 
 
-def multitask_row(path: str) -> dict:
+def infer_multitask_label(data: dict) -> str:
+    metadata = data.get("metadata", {})
+    model_variant = metadata.get("model_variant", "")
+    input_mode = metadata.get("input_mode", "")
+    if model_variant == "physiological_multitask_v2_gt_mask_aux" or input_mode == "gt_mask":
+        return "Physiological multitask v2 (gt-mask auxiliary)"
+    if model_variant == "physiological_multitask_v1_no_mask" or input_mode == "no_mask":
+        return "Physiological multitask v1 no-mask"
+    return "Physiological multitask"
+
+
+def multitask_row(path: str, label: str | None = None) -> dict:
     data = load_json(path)
     recon = data.get("reconstruction", {})
     scalar = data.get("scalar_head", {})
@@ -97,7 +108,7 @@ def multitask_row(path: str) -> dict:
     acc = events.get("acceleration", {})
     dec = events.get("deceleration", {})
     return {
-        "method": "Physiological multitask v1 no-mask",
+        "method": label or infer_multitask_label(data),
         "source": path,
         "overall_mse": recon.get("overall_mse"),
         "corrupted_region_mse": recon.get("corrupted_region_mse"),
@@ -131,7 +142,7 @@ def write_markdown(path: str, rows: list[dict]) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Compare physiological multitask v1 with fixed clinical baselines")
+    parser = argparse.ArgumentParser(description="Compare physiological multitask models with fixed clinical baselines")
     parser.add_argument(
         "--baseline_summary_dir",
         type=str,
@@ -148,6 +159,7 @@ def main() -> None:
         default=str(ARTIFACTS_ROOT / "results" / "physiological_multitask" / "clinical_v1_no_mask" / "comparison"),
     )
     parser.add_argument("--include_gt_oracle", action="store_true")
+    parser.add_argument("--multitask_label", type=str, default="")
     args = parser.parse_args()
 
     baseline_dir = str(resolve_repo_path(args.baseline_summary_dir))
@@ -161,7 +173,7 @@ def main() -> None:
     ]
     if args.include_gt_oracle:
         rows.append(baseline_row("GT-mask oracle denoising", os.path.join(baseline_dir, "gt_mask_test_metrics.json"), direct=False))
-    rows.append(multitask_row(multitask_metrics))
+    rows.append(multitask_row(multitask_metrics, label=args.multitask_label or None))
 
     csv_path = os.path.join(output_dir, "physiological_multitask_comparison.csv")
     with open(csv_path, "w", encoding="utf-8", newline="") as f:

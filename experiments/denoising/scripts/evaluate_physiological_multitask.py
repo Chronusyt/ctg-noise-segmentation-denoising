@@ -1,4 +1,4 @@
-"""Evaluate clinical no-mask physiological multitask v1."""
+"""Evaluate physiological multitask models on the clinical multitask dataset."""
 from __future__ import annotations
 
 import argparse
@@ -50,10 +50,17 @@ def subset_arrays(data: dict, max_samples: int, seed: int) -> tuple[dict, np.nda
     return out, indices
 
 
-def make_model_from_checkpoint(ckpt: dict) -> UNet1DPhysiologicalMultitask:
+def infer_input_mode(args: argparse.Namespace, ckpt: dict) -> str:
+    if args.input_mode:
+        return args.input_mode
+    return ckpt.get("config", {}).get("input_mode", "no_mask")
+
+
+def make_model_from_checkpoint(ckpt: dict, input_mode: str) -> UNet1DPhysiologicalMultitask:
     config = ckpt.get("config", {})
+    in_channels = int(config.get("in_channels", 6 if input_mode == "gt_mask" else 1))
     return UNet1DPhysiologicalMultitask(
-        in_channels=1,
+        in_channels=in_channels,
         base_channels=int(config.get("base_channels", 32)),
         depth=int(config.get("depth", 3)),
         scalar_hidden_channels=int(config.get("scalar_hidden_channels", 128)),
@@ -67,12 +74,23 @@ def denormalize(values: np.ndarray, label_stats: dict, key: str) -> np.ndarray:
     return values * float(stats["std"]) + float(stats["mean"])
 
 
+def build_input_chunk(data: dict, start: int, end: int, input_mode: str) -> np.ndarray:
+    noisy = data["noisy_signals"][start:end, np.newaxis, :].astype(np.float32)
+    if input_mode == "no_mask":
+        return noisy
+    if input_mode == "gt_mask":
+        masks = np.transpose(data["masks"][start:end], (0, 2, 1)).astype(np.float32)
+        return np.concatenate([noisy, masks], axis=1)
+    raise ValueError(f"Unsupported input_mode: {input_mode}")
+
+
 def predict(
     model: torch.nn.Module,
-    noisy: np.ndarray,
+    data: dict,
     label_stats: dict,
     device: str,
     batch_size: int,
+    input_mode: str,
 ) -> dict:
     model.eval()
     preds = {
@@ -85,8 +103,10 @@ def predict(
         "baseline_variability": [],
     }
     with torch.no_grad():
-        for start in range(0, noisy.shape[0], batch_size):
-            x = torch.from_numpy(noisy[start : start + batch_size, np.newaxis, :].astype(np.float32)).to(device)
+        n = data["noisy_signals"].shape[0]
+        for start in range(0, n, batch_size):
+            end = min(start + batch_size, n)
+            x = torch.from_numpy(build_input_chunk(data, start, end, input_mode)).to(device)
             out = model(x)
             preds["reconstruction"].append(out["reconstruction"].cpu().numpy()[:, 0, :])
             preds["acc_logits"].append(out["acc_logits"].cpu().numpy()[:, 0, :])
@@ -102,7 +122,7 @@ def reconstruction_metrics(pred: np.ndarray, clean: np.ndarray, noise_mask: np.n
     clean = clean.astype(np.float64).ravel()
     noise_mask = noise_mask.astype(bool).ravel()
     clean_mask = ~noise_mask
-    out = {
+    return {
         "overall_mse": float(np.mean((pred - clean) ** 2)),
         "overall_mae": float(np.mean(np.abs(pred - clean))),
         "corrupted_region_mse": float(np.mean((pred[noise_mask] - clean[noise_mask]) ** 2)) if np.any(noise_mask) else float("nan"),
@@ -110,7 +130,6 @@ def reconstruction_metrics(pred: np.ndarray, clean: np.ndarray, noise_mask: np.n
         "clean_region_mse": float(np.mean((pred[clean_mask] - clean[clean_mask]) ** 2)) if np.any(clean_mask) else float("nan"),
         "clean_region_mae": float(np.mean(np.abs(pred[clean_mask] - clean[clean_mask]))) if np.any(clean_mask) else float("nan"),
     }
-    return out
 
 
 def binary_metrics(logits: np.ndarray, labels: np.ndarray, threshold: float) -> Dict[str, float]:
@@ -194,7 +213,14 @@ def choose_visual_indices(data: dict, n_vis: int, seed: int) -> np.ndarray:
     return np.sort(rng.choice(n, size=min(n_vis, n), replace=False))
 
 
-def plot_visualizations(data: dict, preds: dict, save_dir: str, indices: np.ndarray, threshold: float) -> None:
+def plot_visualizations(
+    data: dict,
+    preds: dict,
+    derived: dict | None,
+    save_dir: str,
+    indices: np.ndarray,
+    threshold: float,
+) -> None:
     if indices.size == 0:
         return
     try:
@@ -217,7 +243,15 @@ def plot_visualizations(data: dict, preds: dict, save_dir: str, indices: np.ndar
         axes[0].plot(x, noisy, "k-", linewidth=0.8, label="noisy")
         axes[0].plot(x, clean, "g-", linewidth=0.9, label="clean target")
         axes[0].plot(x, recon, "b-", linewidth=0.9, label="multitask recon")
-        axes[0].fill_between(x, min(noisy.min(), clean.min()) - 5, max(noisy.max(), clean.max()) + 5, where=noise_mask, color="red", alpha=0.15, label="noise region")
+        axes[0].fill_between(
+            x,
+            min(noisy.min(), clean.min()) - 5,
+            max(noisy.max(), clean.max()) + 5,
+            where=noise_mask,
+            color="red",
+            alpha=0.15,
+            label="noise region",
+        )
         axes[0].legend(loc="upper right", fontsize=8)
         axes[0].set_ylabel("FHR")
         axes[0].grid(True, alpha=0.3)
@@ -238,14 +272,22 @@ def plot_visualizations(data: dict, preds: dict, save_dir: str, indices: np.ndar
         axes[2].set_ylabel("DEC")
         axes[2].grid(True, alpha=0.3)
 
+        derived_text = ""
+        if derived is not None:
+            derived_text = (
+                f"\nrecon-derived baseline/STV/LTV/BV: "
+                f"{derived['baseline'][idx]:.2f} / {derived['stv'][idx]:.2f} / "
+                f"{derived['ltv'][idx]:.2f} / {derived['baseline_variability'][idx]:.2f}"
+            )
         scalar_text = (
-            f"baseline GT/pred: {data['baseline_labels'][idx]:.2f} / {preds['baseline'][idx]:.2f}\n"
-            f"STV GT/pred: {data['stv_labels'][idx]:.2f} / {preds['stv'][idx]:.2f}\n"
-            f"LTV GT/pred: {data['ltv_labels'][idx]:.2f} / {preds['ltv'][idx]:.2f}\n"
-            f"BV GT/pred: {data['baseline_variability_labels'][idx]:.2f} / {preds['baseline_variability'][idx]:.2f}"
+            f"head baseline GT/pred: {data['baseline_labels'][idx]:.2f} / {preds['baseline'][idx]:.2f}\n"
+            f"head STV GT/pred: {data['stv_labels'][idx]:.2f} / {preds['stv'][idx]:.2f}\n"
+            f"head LTV GT/pred: {data['ltv_labels'][idx]:.2f} / {preds['ltv'][idx]:.2f}\n"
+            f"head BV GT/pred: {data['baseline_variability_labels'][idx]:.2f} / {preds['baseline_variability'][idx]:.2f}"
+            f"{derived_text}"
         )
         axes[3].axis("off")
-        axes[3].text(0.02, 0.75, scalar_text, transform=axes[3].transAxes, fontsize=11, va="top")
+        axes[3].text(0.02, 0.85, scalar_text, transform=axes[3].transAxes, fontsize=10, va="top")
         axes[3].set_title(f"sample_index={idx}")
 
         plt.tight_layout()
@@ -300,7 +342,7 @@ def write_outputs(output_dir: str, results: dict) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Evaluate no-mask physiological multitask v1")
+    parser = argparse.ArgumentParser(description="Evaluate physiological multitask model (v1 no-mask / v2 gt-mask auxiliary)")
     parser.add_argument(
         "--data_dir",
         type=str,
@@ -323,6 +365,7 @@ def main() -> None:
     parser.add_argument("--max_samples", type=int, default=0, help="Debug only; 0 means full split")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--n_vis", type=int, default=5)
+    parser.add_argument("--input_mode", choices=["no_mask", "gt_mask"], default="")
     parser.add_argument("--no_derived_features", action="store_true")
     parser.add_argument("--derived_chunk_size", type=int, default=4096)
     args = parser.parse_args()
@@ -334,18 +377,21 @@ def main() -> None:
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     print(f"使用设备: {device}", flush=True)
 
-    data, indices = subset_arrays(load_multitask_npz(args.data_dir, args.split), args.max_samples, args.seed)
+    data, _indices = subset_arrays(load_multitask_npz(args.data_dir, args.split), args.max_samples, args.seed)
     print(f"Loaded split={args.split}, samples={data['noisy_signals'].shape[0]}", flush=True)
 
     ckpt = torch.load(args.model_path, map_location=device)
     label_stats = ckpt.get("label_stats") or ckpt.get("config", {}).get("label_stats")
     if label_stats is None:
         raise KeyError("Checkpoint missing label_stats")
-    model = make_model_from_checkpoint(ckpt)
+    input_mode = infer_input_mode(args, ckpt)
+    print(f"输入模式: {input_mode}", flush=True)
+
+    model = make_model_from_checkpoint(ckpt, input_mode=input_mode)
     model.load_state_dict(ckpt["model_state_dict"] if "model_state_dict" in ckpt else ckpt)
     model = model.to(device)
 
-    preds = predict(model, data["noisy_signals"], label_stats, device, args.batch_size)
+    preds = predict(model, data, label_stats, device, args.batch_size, input_mode=input_mode)
     noise_mask = (data["artifact_labels"] > 0.5).any(axis=-1)
     results = {
         "metadata": {
@@ -353,7 +399,8 @@ def main() -> None:
             "data_dir": args.data_dir,
             "split": args.split,
             "n_samples": int(data["noisy_signals"].shape[0]),
-            "input_mode": "no_mask",
+            "input_mode": input_mode,
+            "model_variant": ckpt.get("config", {}).get("model_variant", ""),
         },
         "reconstruction": reconstruction_metrics(preds["reconstruction"], data["clean_signals"], noise_mask),
         "event_prediction": {
@@ -363,6 +410,7 @@ def main() -> None:
         "scalar_head": scalar_metrics(preds, data),
     }
 
+    derived = None
     if not args.no_derived_features:
         print("Computing reconstructed-signal-derived physiological features...", flush=True)
         derived = compute_derived_features(preds["reconstruction"], args.derived_chunk_size)
@@ -372,7 +420,7 @@ def main() -> None:
 
     write_outputs(args.output_dir, results)
     vis_indices = choose_visual_indices(data, args.n_vis, args.seed)
-    plot_visualizations(data, preds, os.path.join(args.output_dir, "figures"), vis_indices, args.threshold)
+    plot_visualizations(data, preds, derived, os.path.join(args.output_dir, "figures"), vis_indices, args.threshold)
 
 
 if __name__ == "__main__":

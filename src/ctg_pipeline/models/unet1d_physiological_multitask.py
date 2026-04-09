@@ -1,8 +1,11 @@
 """
 1D U-Net style physiological multitask model.
 
-No-mask v1 input:
-    noisy FHR [B, 1, L]
+Supported inputs:
+    no-mask v1:
+        noisy FHR [B, 1, L]
+    gt-mask auxiliary v2:
+        noisy FHR + 5-class GT masks [B, 6, L]
 
 Outputs:
     reconstruction [B, 1, L]
@@ -43,7 +46,7 @@ class ScalarRegressionHead(nn.Module):
 
 class UNet1DPhysiologicalMultitask(nn.Module):
     """
-    Shared-encoder no-mask physiological multitask U-Net.
+    Shared-encoder physiological multitask U-Net.
 
     The decoder feature map is shared by the reconstruction and temporal event
     heads; scalar physiological heads read from the bottleneck representation.
@@ -128,14 +131,15 @@ class UNet1DPhysiologicalMultitask(nn.Module):
 
 
 def _test() -> None:
-    model = UNet1DPhysiologicalMultitask(in_channels=1, base_channels=32, depth=3)
-    x = torch.randn(4, 1, 240)
-    y = model(x)
-    assert y["reconstruction"].shape == (4, 1, 240)
-    assert y["acc_logits"].shape == (4, 1, 240)
-    assert y["dec_logits"].shape == (4, 1, 240)
-    for key in ("baseline", "stv", "ltv", "baseline_variability"):
-        assert y[key].shape == (4,), f"{key}: {y[key].shape}"
+    for in_channels in (1, 6):
+        model = UNet1DPhysiologicalMultitask(in_channels=in_channels, base_channels=32, depth=3)
+        x = torch.randn(4, in_channels, 240)
+        y = model(x)
+        assert y["reconstruction"].shape == (4, 1, 240)
+        assert y["acc_logits"].shape == (4, 1, 240)
+        assert y["dec_logits"].shape == (4, 1, 240)
+        for key in ("baseline", "stv", "ltv", "baseline_variability"):
+            assert y[key].shape == (4,), f"{key}: {y[key].shape}"
     print("UNet1DPhysiologicalMultitask test OK")
 
 
