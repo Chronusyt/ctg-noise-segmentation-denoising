@@ -6,6 +6,8 @@ Supported inputs:
         noisy FHR [B, 1, L]
     gt-mask auxiliary v2:
         noisy FHR + 5-class GT masks [B, 6, L]
+    pred-mask constrained v3:
+        noisy FHR + 5-class predicted masks [B, 6, L]
 
 Outputs:
     reconstruction [B, 1, L]

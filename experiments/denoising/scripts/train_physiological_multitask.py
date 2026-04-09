@@ -82,6 +82,12 @@ def normalize_scalar(batch: dict, key: str, label_stats: Dict[str, Dict[str, flo
     return (value - mean) / std
 
 
+def pred_mask_cache_path_for_split(pred_mask_cache_dir: str | None, split: str) -> str | None:
+    if not pred_mask_cache_dir:
+        return None
+    return os.path.join(pred_mask_cache_dir, f"{split}_pred_masks.npz")
+
+
 def build_model_input(batch: dict, device: str, input_mode: str) -> torch.Tensor:
     noisy = batch["noisy_signal"].to(device)
     if input_mode == "no_mask":
@@ -89,13 +95,27 @@ def build_model_input(batch: dict, device: str, input_mode: str) -> torch.Tensor
     if input_mode == "gt_mask":
         mask = batch["mask"].to(device)
         return torch.cat([noisy, mask], dim=1)
+    if input_mode == "pred_mask":
+        if "pred_mask" not in batch:
+            raise KeyError("input_mode=pred_mask but batch is missing pred_mask. Provide pred-mask cache or embedded pred_masks.")
+        mask = batch["pred_mask"].to(device)
+        return torch.cat([noisy, mask], dim=1)
     raise ValueError(f"Unsupported input_mode: {input_mode}")
 
 
 def build_edit_gate(batch: dict, device: str, input_mode: str, args: argparse.Namespace) -> torch.Tensor | None:
-    if input_mode != "gt_mask" or args.gate_mode == "none":
+    if args.gate_mode == "none":
         return None
-    mask = batch["mask"].to(device)
+
+    if input_mode == "gt_mask":
+        mask = batch["mask"].to(device)
+    elif input_mode == "pred_mask":
+        if "pred_mask" not in batch:
+            raise KeyError("gate_mode requires pred_mask, but batch is missing pred_mask.")
+        mask = batch["pred_mask"].to(device)
+    else:
+        return None
+
     return build_edit_gate_torch(
         mask,
         gate_mode=args.gate_mode,
@@ -218,7 +238,15 @@ def compute_losses(
     clean = batch["clean_signal"].to(device)
     acc_label = batch["acc_label"].to(device)
     dec_label = batch["dec_label"].to(device)
-    region_masks = compute_region_masks_torch(batch["mask"].to(device), boundary_k=args.boundary_k)
+    if args.loss_mask_source == "gt":
+        loss_mask = batch["mask"].to(device)
+    elif args.loss_mask_source == "pred":
+        if "pred_mask" not in batch:
+            raise KeyError("loss_mask_source=pred but batch is missing pred_mask.")
+        loss_mask = batch["pred_mask"].to(device)
+    else:
+        raise ValueError(f"Unsupported loss_mask_source: {args.loss_mask_source}")
+    region_masks = compute_region_masks_torch(loss_mask, boundary_k=args.boundary_k)
 
     losses = reconstruction_terms(outputs["reconstruction"], clean, noisy, region_masks, args)
     losses.update(
@@ -372,9 +400,13 @@ def append_train_log(path: str, epoch: int, lr: float, train: dict, val: dict) -
 def infer_model_variant(args: argparse.Namespace) -> str:
     if args.input_mode == "no_mask":
         return "physiological_multitask_v1_no_mask"
-    if args.gate_mode == "none":
+    if args.input_mode == "gt_mask" and args.gate_mode == "none":
         return "physiological_multitask_v2_gt_mask_aux"
-    return "physiological_multitask_v2_2_gt_mask_constrained_editing"
+    if args.input_mode == "gt_mask":
+        return "physiological_multitask_v2_2_gt_mask_constrained_editing"
+    if args.input_mode == "pred_mask":
+        return "physiological_multitask_v3_pred_mask_constrained_editing"
+    return "physiological_multitask"
 
 
 def main() -> None:
@@ -389,13 +421,21 @@ def main() -> None:
         type=str,
         default=str(ARTIFACTS_ROOT / "results" / "physiological_multitask" / "clinical_v1_no_mask"),
     )
-    parser.add_argument("--input_mode", choices=["no_mask", "gt_mask"], default="no_mask")
+    parser.add_argument("--input_mode", choices=["no_mask", "gt_mask", "pred_mask"], default="no_mask")
+    parser.add_argument(
+        "--pred_mask_cache_dir",
+        type=str,
+        default="",
+        help="Optional directory with train/val/test_pred_masks.npz. When omitted, use embedded pred_masks if present.",
+    )
+    parser.add_argument("--pred_mask_variant", choices=["soft", "hard"], default="soft")
     parser.add_argument("--gate_mode", choices=["none", "union_soft", "union_dilated_soft"], default="none")
     parser.add_argument("--clean_gate_value", type=float, default=0.1)
     parser.add_argument("--gate_dilation_radius", type=int, default=5)
     parser.add_argument("--gate_smooth_kernel", type=int, default=5)
     parser.add_argument("--identity_region", choices=["all_clean", "far_clean"], default="far_clean")
     parser.add_argument("--boundary_k", type=int, default=5)
+    parser.add_argument("--loss_mask_source", choices=["gt", "pred"], default="gt")
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=1e-3)
@@ -442,6 +482,7 @@ def main() -> None:
 
     args.data_dir = str(resolve_repo_path(args.data_dir))
     args.output_dir = str(resolve_repo_path(args.output_dir))
+    args.pred_mask_cache_dir = str(resolve_repo_path(args.pred_mask_cache_dir)) if args.pred_mask_cache_dir else ""
     os.makedirs(args.output_dir, exist_ok=True)
 
     set_seed(args.seed)
@@ -450,17 +491,28 @@ def main() -> None:
     print("Physiological multitask 训练启动", flush=True)
     print(f"使用设备: {device}", flush=True)
     print(f"输入模式: {args.input_mode}", flush=True)
+    print(f"pred mask cache: {args.pred_mask_cache_dir or 'embedded_or_none'}", flush=True)
+    print(f"pred mask variant: {args.pred_mask_variant}", flush=True)
     print(f"gate 模式: {args.gate_mode}", flush=True)
     print(f"重建模式: {args.reconstruction_mode}", flush=True)
     print(f"identity region: {args.identity_region}", flush=True)
     print(f"boundary_k: {args.boundary_k}", flush=True)
+    print(f"loss mask source: {args.loss_mask_source}", flush=True)
     print(f"事件损失: acc={args.acc_event_loss}, dec={args.dec_event_loss}", flush=True)
     print(f"数据目录: {args.data_dir}", flush=True)
 
     train_path = os.path.join(args.data_dir, "train_dataset_multitask.npz")
     val_path = os.path.join(args.data_dir, "val_dataset_multitask.npz")
-    train_full = ClinicalMultitaskDataset(train_path)
-    val_full = ClinicalMultitaskDataset(val_path)
+    train_full = ClinicalMultitaskDataset(
+        train_path,
+        pred_mask_cache_path=pred_mask_cache_path_for_split(args.pred_mask_cache_dir, "train"),
+        pred_mask_variant=args.pred_mask_variant,
+    )
+    val_full = ClinicalMultitaskDataset(
+        val_path,
+        pred_mask_cache_path=pred_mask_cache_path_for_split(args.pred_mask_cache_dir, "val"),
+        pred_mask_variant=args.pred_mask_variant,
+    )
     train_ds = make_subset(train_full, args.max_train_samples, args.seed)
     val_ds = make_subset(val_full, args.max_val_samples, args.seed + 1)
     print(f"train samples: {len(train_ds)} (full={len(train_full)})", flush=True)

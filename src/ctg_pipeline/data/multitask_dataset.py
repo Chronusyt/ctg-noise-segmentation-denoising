@@ -21,14 +21,58 @@ REQUIRED_FIELDS = (
     "dec_labels",
 )
 
+PRED_MASK_VARIANTS = ("soft", "hard")
 
-def load_multitask_arrays(path: str) -> Dict[str, np.ndarray]:
-    """Load a multitask `.npz` file into memory and validate required fields."""
+
+def _load_npz_dict(path: str) -> Dict[str, np.ndarray]:
     data = np.load(path)
-    missing = [name for name in REQUIRED_FIELDS if name not in data.files]
+    return {name: np.asarray(data[name]) for name in data.files}
+
+
+def _validate_pred_mask_cache(
+    arrays: Dict[str, np.ndarray],
+    pred_arrays: Dict[str, np.ndarray],
+    pred_mask_variant: str,
+    pred_mask_cache_path: str,
+) -> np.ndarray:
+    if pred_mask_variant not in PRED_MASK_VARIANTS:
+        raise ValueError(f"Unsupported pred_mask_variant: {pred_mask_variant}")
+
+    pred_key = "pred_masks_soft" if pred_mask_variant == "soft" else "pred_masks_hard"
+    if pred_key not in pred_arrays:
+        raise KeyError(f"Missing {pred_key} in pred-mask cache: {pred_mask_cache_path}")
+
+    pred_masks = np.asarray(pred_arrays[pred_key])
+    n = arrays["noisy_signals"].shape[0]
+    expected_shape = (n, arrays["noisy_signals"].shape[1], arrays["masks"].shape[2])
+    if pred_masks.shape != expected_shape:
+        raise ValueError(
+            f"Pred-mask cache shape mismatch: {pred_masks.shape} != {expected_shape} "
+            f"({pred_mask_cache_path})"
+        )
+
+    for key in ("parent_index", "chunk_index"):
+        if key in arrays and key in pred_arrays and not np.array_equal(arrays[key], pred_arrays[key]):
+            raise ValueError(f"Pred-mask cache alignment mismatch for {key}: {pred_mask_cache_path}")
+    return pred_masks
+
+
+def load_multitask_arrays(
+    path: str,
+    pred_mask_cache_path: str | None = None,
+    pred_mask_variant: str = "soft",
+) -> Dict[str, np.ndarray]:
+    """Load a multitask `.npz` file into memory and validate required fields."""
+    arrays = _load_npz_dict(path)
+    missing = [name for name in REQUIRED_FIELDS if name not in arrays]
     if missing:
         raise KeyError(f"Missing fields in {path}: {missing}")
-    return {name: np.asarray(data[name]) for name in data.files}
+
+    if pred_mask_cache_path:
+        pred_arrays = _load_npz_dict(pred_mask_cache_path)
+        arrays["pred_masks"] = _validate_pred_mask_cache(arrays, pred_arrays, pred_mask_variant, pred_mask_cache_path)
+
+    return arrays
 
 
 @dataclass
@@ -49,13 +93,19 @@ class ClinicalMultitaskDataset(Dataset):
 
     path: str
     add_channel_dim: bool = True
+    pred_mask_cache_path: str | None = None
+    pred_mask_variant: str = "soft"
 
     def __post_init__(self) -> None:
-        arrays = load_multitask_arrays(self.path)
+        arrays = load_multitask_arrays(
+            self.path,
+            pred_mask_cache_path=self.pred_mask_cache_path,
+            pred_mask_variant=self.pred_mask_variant,
+        )
         self.noisy = np.asarray(arrays["noisy_signals"], dtype=np.float32)
         self.clean = np.asarray(arrays["clean_signals"], dtype=np.float32)
         self.masks = np.asarray(arrays["masks"], dtype=np.float32)
-        self.pred_masks = np.asarray(arrays["pred_masks"], dtype=np.float32) if "pred_masks" in arrays else None
+        self.pred_masks = np.asarray(arrays["pred_masks"]) if "pred_masks" in arrays else None
         self.baseline = np.asarray(arrays["baseline_labels"], dtype=np.float32)
         self.stv = np.asarray(arrays["stv_labels"], dtype=np.float32)
         self.ltv = np.asarray(arrays["ltv_labels"], dtype=np.float32)

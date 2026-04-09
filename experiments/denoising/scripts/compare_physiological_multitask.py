@@ -101,6 +101,8 @@ def infer_multitask_label(data: dict) -> str:
     model_variant = metadata.get("model_variant", "")
     input_mode = metadata.get("input_mode", "")
     gate_mode = metadata.get("gate_mode", "none")
+    if model_variant == "physiological_multitask_v3_pred_mask_constrained_editing":
+        return "Physiological multitask v3 (pred-mask constrained editing)"
     if model_variant == "physiological_multitask_v2_2_gt_mask_constrained_editing":
         return "Physiological multitask v2.2 (gt-mask constrained editing)"
     if model_variant == "physiological_multitask_v2_gt_mask_aux" or (input_mode == "gt_mask" and gate_mode == "none"):
@@ -181,12 +183,18 @@ def main() -> None:
     parser.add_argument(
         "--v2_metrics",
         type=str,
-        default=str(ARTIFACTS_ROOT / "results" / "physiological_multitask" / "clinical_v2_gt_mask_selective" / "eval" / "test_metrics.json"),
+        default="",
+        help="Optional legacy v2 metrics path; leave empty to omit v2 from the comparison table.",
     )
     parser.add_argument(
         "--v2_2_metrics",
         type=str,
-        default=str(ARTIFACTS_ROOT / "results" / "physiological_multitask" / "clinical_v2_2_gt_mask_constrained" / "eval" / "test_metrics.json"),
+        default=str(ARTIFACTS_ROOT / "results" / "physiological_multitask" / "clinical_v2_2_gt_mask_constrained_A" / "eval" / "test_metrics.json"),
+    )
+    parser.add_argument(
+        "--v3_metrics",
+        type=str,
+        default="",
     )
     parser.add_argument(
         "--output_dir",
@@ -208,8 +216,9 @@ def main() -> None:
         rows.append(baseline_row("GT-mask oracle denoising", os.path.join(baseline_dir, "gt_mask_test_metrics.json"), direct=False))
 
     maybe_add_multitask(rows, args.v1_metrics, label="Physiological multitask v1 no-mask")
-    maybe_add_multitask(rows, args.v2_metrics, label="Physiological multitask v2 (gt-mask auxiliary)")
     maybe_add_multitask(rows, args.v2_2_metrics, label="Physiological multitask v2.2 (gt-mask constrained editing)")
+    maybe_add_multitask(rows, args.v3_metrics, label="Physiological multitask v3 (pred-mask constrained editing)")
+    maybe_add_multitask(rows, args.v2_metrics, label="Physiological multitask v2 (gt-mask auxiliary)")
 
     csv_path = os.path.join(output_dir, "physiological_multitask_comparison.csv")
     with open(csv_path, "w", encoding="utf-8", newline="") as f:

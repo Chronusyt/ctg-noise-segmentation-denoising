@@ -1,4 +1,4 @@
-"""Helpers for GT-mask constrained residual editing and region diagnostics."""
+"""Helpers for constrained residual editing and region diagnostics."""
 from __future__ import annotations
 
 from typing import Dict
@@ -51,7 +51,7 @@ def build_edit_gate_torch(
     smooth_kernel_size: int = 5,
 ) -> torch.Tensor:
     """
-    Build a single-channel edit gate from GT multilabel masks.
+    Build a single-channel edit gate from multilabel masks.
 
     Gate semantics:
     - corrupted region: gate close to 1.0
@@ -94,4 +94,3 @@ def compute_region_masks_torch(multilabel_mask: torch.Tensor, boundary_k: int = 
         "boundary_near_clean": boundary_near_clean,
         "far_clean": far_clean,
     }
-

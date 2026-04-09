@@ -20,6 +20,7 @@ for _path in (_REPO_ROOT, _SRC_ROOT):
         sys.path.insert(0, str(_path))
 
 from ctg_pipeline.features.physiology import FeatureConfig, compute_multitask_physiology_labels
+from ctg_pipeline.data.multitask_dataset import load_multitask_arrays
 from ctg_pipeline.models.unet1d_physiological_multitask import UNet1DPhysiologicalMultitask
 from ctg_pipeline.utils.editing import build_edit_gate_torch, compute_region_masks_torch
 from ctg_pipeline.utils.pathing import ARTIFACTS_ROOT, DENOISING_DATASETS_ROOT, resolve_repo_path
@@ -28,12 +29,26 @@ from ctg_pipeline.utils.pathing import ARTIFACTS_ROOT, DENOISING_DATASETS_ROOT, 
 SCALAR_KEYS = ("baseline", "stv", "ltv", "baseline_variability")
 
 
-def load_multitask_npz(data_dir: str, split: str) -> dict:
+def pred_mask_cache_path_for_split(pred_mask_cache_dir: str | None, split: str) -> str | None:
+    if not pred_mask_cache_dir:
+        return None
+    return os.path.join(pred_mask_cache_dir, f"{split}_pred_masks.npz")
+
+
+def load_multitask_npz(
+    data_dir: str,
+    split: str,
+    pred_mask_cache_dir: str | None = None,
+    pred_mask_variant: str = "soft",
+) -> dict:
     path = os.path.join(data_dir, f"{split}_dataset_multitask.npz")
     if not os.path.isfile(path):
         raise FileNotFoundError(path)
-    data = np.load(path)
-    return {key: np.asarray(data[key]) for key in data.files}
+    return load_multitask_arrays(
+        path,
+        pred_mask_cache_path=pred_mask_cache_path_for_split(pred_mask_cache_dir, split),
+        pred_mask_variant=pred_mask_variant,
+    )
 
 
 def subset_arrays(data: dict, max_samples: int, seed: int) -> tuple[dict, np.ndarray]:
@@ -65,7 +80,7 @@ def infer_gate_mode(args: argparse.Namespace, ckpt: dict) -> str:
 
 def make_model_from_checkpoint(ckpt: dict, input_mode: str) -> UNet1DPhysiologicalMultitask:
     config = ckpt.get("config", {})
-    in_channels = int(config.get("in_channels", 6 if input_mode == "gt_mask" else 1))
+    in_channels = int(config.get("in_channels", 6 if input_mode in {"gt_mask", "pred_mask"} else 1))
     return UNet1DPhysiologicalMultitask(
         in_channels=in_channels,
         base_channels=int(config.get("base_channels", 32)),
@@ -88,13 +103,28 @@ def build_input_chunk(data: dict, start: int, end: int, input_mode: str) -> np.n
     if input_mode == "gt_mask":
         masks = np.transpose(data["masks"][start:end], (0, 2, 1)).astype(np.float32)
         return np.concatenate([noisy, masks], axis=1)
+    if input_mode == "pred_mask":
+        if "pred_masks" not in data:
+            raise KeyError("input_mode=pred_mask but data is missing pred_masks. Provide pred-mask cache or embedded pred_masks.")
+        masks = np.transpose(data["pred_masks"][start:end], (0, 2, 1)).astype(np.float32)
+        return np.concatenate([noisy, masks], axis=1)
     raise ValueError(f"Unsupported input_mode: {input_mode}")
 
 
 def build_gate_chunk(data: dict, start: int, end: int, input_mode: str, gate_mode: str, ckpt_config: dict, device: str) -> torch.Tensor | None:
-    if input_mode != "gt_mask" or gate_mode == "none":
+    if gate_mode == "none":
         return None
-    mask = torch.from_numpy(np.transpose(data["masks"][start:end], (0, 2, 1)).astype(np.float32)).to(device)
+
+    if input_mode == "gt_mask":
+        mask_arr = data["masks"][start:end]
+    elif input_mode == "pred_mask":
+        if "pred_masks" not in data:
+            raise KeyError("gate_mode requires pred_masks, but evaluation data is missing pred_masks.")
+        mask_arr = data["pred_masks"][start:end]
+    else:
+        return None
+
+    mask = torch.from_numpy(np.transpose(mask_arr, (0, 2, 1)).astype(np.float32)).to(device)
     return build_edit_gate_torch(
         mask,
         gate_mode=gate_mode,
@@ -379,7 +409,25 @@ def write_outputs(output_dir: str, results: dict) -> None:
         writer.writerow(["metric", "value"])
         for key, value in flat.items():
             writer.writerow([key, value])
-    print(f"Metrics saved to {json_path}, {txt_path}, {csv_path}")
+
+    md_path = os.path.join(output_dir, "test_metrics.md")
+    lines = ["# Physiological Multitask Evaluation", ""]
+    for section, values in results.items():
+        lines.append(f"## {section}")
+        if isinstance(values, dict):
+            for key, value in values.items():
+                if isinstance(value, dict):
+                    lines.append(f"- {key}:")
+                    for subkey, subvalue in value.items():
+                        lines.append(f"  - {subkey}: {subvalue}")
+                else:
+                    lines.append(f"- {key}: {value}")
+        else:
+            lines.append(f"- value: {values}")
+        lines.append("")
+    with open(md_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    print(f"Metrics saved to {json_path}, {txt_path}, {csv_path}, {md_path}")
 
 
 def write_boundary_report(output_dir: str, reconstruction: dict, boundary_k: int) -> None:
@@ -435,7 +483,9 @@ def main() -> None:
     parser.add_argument("--max_samples", type=int, default=0, help="Debug only; 0 means full split")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--n_vis", type=int, default=5)
-    parser.add_argument("--input_mode", choices=["no_mask", "gt_mask"], default="")
+    parser.add_argument("--pred_mask_cache_dir", type=str, default="")
+    parser.add_argument("--pred_mask_variant", choices=["soft", "hard"], default="soft")
+    parser.add_argument("--input_mode", choices=["no_mask", "gt_mask", "pred_mask"], default="")
     parser.add_argument("--gate_mode", choices=["none", "union_soft", "union_dilated_soft"], default="")
     parser.add_argument("--boundary_k", type=int, default=-1)
     parser.add_argument("--no_derived_features", action="store_true")
@@ -445,11 +495,21 @@ def main() -> None:
     args.data_dir = str(resolve_repo_path(args.data_dir))
     args.model_path = str(resolve_repo_path(args.model_path))
     args.output_dir = str(resolve_repo_path(args.output_dir))
+    args.pred_mask_cache_dir = str(resolve_repo_path(args.pred_mask_cache_dir)) if args.pred_mask_cache_dir else ""
     os.makedirs(args.output_dir, exist_ok=True)
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     print(f"使用设备: {device}", flush=True)
 
-    data, _indices = subset_arrays(load_multitask_npz(args.data_dir, args.split), args.max_samples, args.seed)
+    data, _indices = subset_arrays(
+        load_multitask_npz(
+            args.data_dir,
+            args.split,
+            pred_mask_cache_dir=args.pred_mask_cache_dir,
+            pred_mask_variant=args.pred_mask_variant,
+        ),
+        args.max_samples,
+        args.seed,
+    )
     print(f"Loaded split={args.split}, samples={data['noisy_signals'].shape[0]}", flush=True)
 
     ckpt = torch.load(args.model_path, map_location=device)
@@ -463,6 +523,8 @@ def main() -> None:
     acc_threshold = args.acc_threshold if args.acc_threshold >= 0 else args.threshold
     dec_threshold = args.dec_threshold if args.dec_threshold >= 0 else args.threshold
     print(f"输入模式: {input_mode}", flush=True)
+    print(f"pred mask cache: {args.pred_mask_cache_dir or 'embedded_or_none'}", flush=True)
+    print(f"pred mask variant: {args.pred_mask_variant}", flush=True)
     print(f"gate 模式: {gate_mode}", flush=True)
     print(f"boundary_k: {boundary_k}", flush=True)
     print(f"thresholds: acc={acc_threshold}, dec={dec_threshold}", flush=True)
@@ -486,6 +548,8 @@ def main() -> None:
             "split": args.split,
             "n_samples": int(data["noisy_signals"].shape[0]),
             "input_mode": input_mode,
+            "pred_mask_cache_dir": args.pred_mask_cache_dir,
+            "pred_mask_variant": args.pred_mask_variant,
             "gate_mode": gate_mode,
             "boundary_k": boundary_k,
             "model_variant": ckpt_config.get("model_variant", ""),
