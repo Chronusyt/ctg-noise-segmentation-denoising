@@ -14,6 +14,7 @@ Labels:
 - baseline_variability_class: auxiliary int32, shape [N], -1 unknown, 0 absent, 1 minimal/reduced, 2 moderate/normal, 3 marked
 - acc_label: uint8, shape [N,L], pointwise acceleration label from clean FHR and FIGO 15x15 detector
 - dec_label: uint8, shape [N,L], pointwise deceleration label from clean FHR and FIGO 15x15 detector
+- acc/dec labels are event masks, not waveform traces; plot them as overlays on clean FHR when inspecting morphology
 
 Baseline variability decision:
 - v1 main label uses continuous regression rather than a primary class label.
