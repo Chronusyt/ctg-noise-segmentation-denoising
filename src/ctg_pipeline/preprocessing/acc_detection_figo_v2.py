@@ -81,7 +81,7 @@ class AccelerationConfig:
 class Acceleration:
     """Detected acceleration event."""
     start_idx: int
-    end_idx: int
+    end_idx: int  # exclusive
     peak_idx: int
     peak_amplitude: float
     mean_amplitude: float
@@ -233,7 +233,7 @@ class AccelerationDetector:
         
         # Handle case where signal ends during acceleration
         if in_region and n > region_start:
-            candidates.append((region_start, n - 1))
+            candidates.append((region_start, n))
         
         return candidates
     

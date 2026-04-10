@@ -42,7 +42,9 @@ pipeline.
   mean robust one-minute baseline-deviation amplitude in bpm. The class label is
   saved as auxiliary metadata rather than used as the main v1 target.
 - Acceleration / deceleration: pointwise binary labels generated from clean FHR
-  with the existing FIGO 15x15 detectors.
+  with the existing FIGO 15x15 detectors. These labels are event masks, not
+  waveform traces; when visualizing morphology, overlay the mask on the clean
+  FHR instead of plotting the binary array alone.
 
 ## Loader
 

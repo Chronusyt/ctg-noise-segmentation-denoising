@@ -272,9 +272,11 @@ class DecelerationDetector:
                         candidates.append((region_start, i))
                     in_region = False
         
-        # Handle case where signal ends during deceleration
+        # Handle case where signal ends during deceleration.
+        # Candidate end indexes are exclusive, so an event that continues to the
+        # last sample should end at n instead of n - 1.
         if in_region and n > region_start:
-            candidates.append((region_start, n - 1))
+            candidates.append((region_start, n))
         
         return candidates
     
@@ -392,7 +394,7 @@ class DecelerationDetector:
         search_end = min(n, end + search_range)
         
         if end >= search_end:
-            return min(end, n - 1)
+            return min(end, n)
         
         # Search forward from end
         region = deviation[end:search_end]

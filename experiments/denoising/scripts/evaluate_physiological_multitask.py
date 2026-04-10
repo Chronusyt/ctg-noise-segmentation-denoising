@@ -281,6 +281,86 @@ def choose_visual_indices(data: dict, n_vis: int, seed: int) -> np.ndarray:
     return np.sort(rng.choice(n, size=min(n_vis, n), replace=False))
 
 
+def mask_to_segments(mask: np.ndarray) -> list[tuple[int, int]]:
+    padded = np.concatenate(([0], np.asarray(mask, dtype=np.uint8), [0]))
+    diff = np.diff(padded)
+    starts = np.where(diff == 1)[0]
+    ends = np.where(diff == -1)[0]
+    return [(int(start), int(end)) for start, end in zip(starts, ends)]
+
+
+def masked_signal(signal: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    out = np.asarray(signal, dtype=np.float64).copy()
+    out[~np.asarray(mask, dtype=bool)] = np.nan
+    return out
+
+
+def plot_event_panel(
+    ax,
+    x: np.ndarray,
+    clean: np.ndarray,
+    recon: np.ndarray,
+    noise_mask: np.ndarray,
+    gt_mask: np.ndarray,
+    pred_prob: np.ndarray,
+    threshold: float,
+    event_name: str,
+    gt_color: str,
+    pred_color: str,
+    y_limits: tuple[float, float],
+) -> tuple[int, int]:
+    pred_mask = pred_prob >= threshold
+
+    ax.fill_between(
+        x,
+        y_limits[0],
+        y_limits[1],
+        where=noise_mask,
+        color="red",
+        alpha=0.08,
+    )
+    ax.plot(x, clean, color="0.75", linewidth=0.8, label="clean FHR")
+    ax.plot(x, recon, color="#6f9cf5", linewidth=0.8, alpha=0.7, label="recon FHR")
+
+    if np.any(gt_mask):
+        ax.plot(x, masked_signal(clean, gt_mask), color=gt_color, linewidth=2.2, label=f"{event_name} GT on clean")
+        for start, end in mask_to_segments(gt_mask):
+            ax.axvspan(start, end, color=gt_color, alpha=0.10)
+
+    if np.any(pred_mask):
+        ax.plot(
+            x,
+            masked_signal(clean, pred_mask),
+            color=pred_color,
+            linewidth=2.0,
+            linestyle="--",
+            label=f"{event_name} pred region on clean",
+        )
+
+    ax.set_ylim(*y_limits)
+    ax.set_ylabel("FHR")
+    ax.grid(True, alpha=0.3)
+
+    ax_prob = ax.twinx()
+    ax_prob.plot(x, pred_prob, color=pred_color, linewidth=1.0, alpha=0.95, label=f"{event_name} pred prob")
+    ax_prob.axhline(threshold, color="gray", linestyle="--", linewidth=0.8, label=f"{event_name} threshold")
+    ax_prob.set_ylim(-0.05, 1.05)
+    ax_prob.set_ylabel("Prob")
+
+    handles, labels = ax.get_legend_handles_labels()
+    prob_handles, prob_labels = ax_prob.get_legend_handles_labels()
+    dedup: dict[str, object] = {}
+    for handle, label in zip(handles + prob_handles, labels + prob_labels):
+        if label not in dedup:
+            dedup[label] = handle
+    ax.legend(list(dedup.values()), list(dedup.keys()), loc="upper right", fontsize=8)
+    ax.set_title(
+        f"{event_name} waveform view | GT samples={int(np.sum(gt_mask))} | "
+        f"pred samples={int(np.sum(pred_mask))}"
+    )
+    return int(np.sum(gt_mask)), int(np.sum(pred_mask))
+
+
 def plot_visualizations(
     data: dict,
     preds: dict,
@@ -309,6 +389,10 @@ def plot_visualizations(
         clean = data["clean_signals"][idx]
         recon = preds["reconstruction"][idx]
         noise_mask = (data["artifact_labels"][idx] > 0.5).any(axis=-1)
+        y_limits = (
+            float(min(noisy.min(), clean.min(), recon.min()) - 5),
+            float(max(noisy.max(), clean.max(), recon.max()) + 5),
+        )
 
         axes[0].plot(x, noisy, "k-", linewidth=0.8, label="noisy")
         axes[0].plot(x, clean, "g-", linewidth=0.9, label="clean target")
@@ -325,22 +409,37 @@ def plot_visualizations(
         axes[0].legend(loc="upper right", fontsize=8)
         axes[0].set_ylabel("FHR")
         axes[0].grid(True, alpha=0.3)
+        axes[0].set_ylim(*y_limits)
 
-        axes[1].plot(x, data["acc_labels"][idx], "g-", linewidth=1.0, label="acc GT")
-        axes[1].plot(x, acc_prob[idx], "b-", linewidth=0.9, label="acc pred prob")
-        axes[1].axhline(acc_threshold, color="gray", linestyle="--", linewidth=0.8)
-        axes[1].set_ylim(-0.05, 1.05)
-        axes[1].legend(loc="upper right", fontsize=8)
-        axes[1].set_ylabel("ACC")
-        axes[1].grid(True, alpha=0.3)
+        acc_gt_samples, acc_pred_samples = plot_event_panel(
+            axes[1],
+            x=x,
+            clean=clean,
+            recon=recon,
+            noise_mask=noise_mask,
+            gt_mask=data["acc_labels"][idx].astype(bool),
+            pred_prob=acc_prob[idx],
+            threshold=acc_threshold,
+            event_name="ACC",
+            gt_color="#2ca02c",
+            pred_color="#1f77b4",
+            y_limits=y_limits,
+        )
 
-        axes[2].plot(x, data["dec_labels"][idx], "g-", linewidth=1.0, label="dec GT")
-        axes[2].plot(x, dec_prob[idx], "b-", linewidth=0.9, label="dec pred prob")
-        axes[2].axhline(dec_threshold, color="gray", linestyle="--", linewidth=0.8)
-        axes[2].set_ylim(-0.05, 1.05)
-        axes[2].legend(loc="upper right", fontsize=8)
-        axes[2].set_ylabel("DEC")
-        axes[2].grid(True, alpha=0.3)
+        dec_gt_samples, dec_pred_samples = plot_event_panel(
+            axes[2],
+            x=x,
+            clean=clean,
+            recon=recon,
+            noise_mask=noise_mask,
+            gt_mask=data["dec_labels"][idx].astype(bool),
+            pred_prob=dec_prob[idx],
+            threshold=dec_threshold,
+            event_name="DEC",
+            gt_color="#8c564b",
+            pred_color="#d62728",
+            y_limits=y_limits,
+        )
 
         derived_text = ""
         if derived is not None:
@@ -349,13 +448,19 @@ def plot_visualizations(
                 f"{derived['baseline'][idx]:.2f} / {derived['stv'][idx]:.2f} / "
                 f"{derived['ltv'][idx]:.2f} / {derived['baseline_variability'][idx]:.2f}"
             )
+        parent_text = ""
+        if "parent_index" in data and "chunk_index" in data:
+            parent_text = f"\nparent/chunk: {int(data['parent_index'][idx])} / {int(data['chunk_index'][idx])}"
         scalar_text = (
             f"gate_mode: {gate_mode}\n"
+            f"ACC GT/pred samples: {acc_gt_samples} / {acc_pred_samples}\n"
+            f"DEC GT/pred samples: {dec_gt_samples} / {dec_pred_samples}\n"
             f"head baseline GT/pred: {data['baseline_labels'][idx]:.2f} / {preds['baseline'][idx]:.2f}\n"
             f"head STV GT/pred: {data['stv_labels'][idx]:.2f} / {preds['stv'][idx]:.2f}\n"
             f"head LTV GT/pred: {data['ltv_labels'][idx]:.2f} / {preds['ltv'][idx]:.2f}\n"
             f"head BV GT/pred: {data['baseline_variability_labels'][idx]:.2f} / {preds['baseline_variability'][idx]:.2f}"
             f"{derived_text}"
+            f"{parent_text}"
         )
         axes[3].axis("off")
         axes[3].text(0.02, 0.85, scalar_text, transform=axes[3].transAxes, fontsize=10, va="top")
