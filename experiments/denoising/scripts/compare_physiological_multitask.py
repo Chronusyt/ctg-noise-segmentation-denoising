@@ -41,6 +41,13 @@ METRICS = [
     "acc_f1",
     "dec_f1",
 ]
+METADATA_FIELDS = [
+    "input_mode",
+    "experiment_variant",
+    "model_variant",
+    "backbone_type",
+    "loss_balance_mode",
+]
 
 
 def load_json(path: str) -> dict:
@@ -73,6 +80,11 @@ def baseline_row(name: str, path: str, direct: bool = False) -> dict:
     return {
         "method": name,
         "source": path,
+        "input_mode": None,
+        "experiment_variant": None,
+        "model_variant": None,
+        "backbone_type": None,
+        "loss_balance_mode": None,
         "overall_mse": overall.get("overall_mse"),
         "corrupted_region_mse": overall.get("corrupted_region_mse"),
         "clean_region_mse": overall.get("clean_region_mse"),
@@ -98,9 +110,25 @@ def baseline_row(name: str, path: str, direct: bool = False) -> dict:
 
 def infer_multitask_label(data: dict) -> str:
     metadata = data.get("metadata", {})
+    architecture_variant = metadata.get("model_variant", "")
+    backbone_type = metadata.get("backbone_type", "unet")
+    loss_balance_mode = metadata.get("loss_balance_mode", "static")
+    experiment_variant = metadata.get("experiment_variant", "")
     model_variant = metadata.get("model_variant", "")
     input_mode = metadata.get("input_mode", "")
     gate_mode = metadata.get("gate_mode", "none")
+    if architecture_variant in {"legacy_single_residual", "expert_residual"}:
+        experiment_map = {
+            "physiological_multitask_v1_no_mask": "Physiological multitask v1 no-mask",
+            "physiological_multitask_v2_gt_mask_aux": "Physiological multitask v2 gt-mask auxiliary",
+            "physiological_multitask_v2_2_gt_mask_constrained_editing": "Physiological multitask v2.2 gt-mask constrained",
+            "physiological_multitask_v3_pred_mask_constrained_editing": "Physiological multitask v3 pred-mask constrained",
+        }
+        base = (
+            experiment_map.get(experiment_variant, experiment_variant)
+            or ("pred-mask" if input_mode == "pred_mask" else "gt-mask" if input_mode == "gt_mask" else "no-mask")
+        )
+        return f"{base} | {architecture_variant} | {backbone_type} | {loss_balance_mode}"
     if model_variant == "physiological_multitask_v3_pred_mask_constrained_editing":
         return "Physiological multitask v3 (pred-mask constrained editing)"
     if model_variant == "physiological_multitask_v2_2_gt_mask_constrained_editing":
@@ -123,6 +151,11 @@ def multitask_row(path: str, label: str | None = None) -> dict:
     return {
         "method": label or infer_multitask_label(data),
         "source": path,
+        "input_mode": data.get("metadata", {}).get("input_mode"),
+        "experiment_variant": data.get("metadata", {}).get("experiment_variant"),
+        "model_variant": data.get("metadata", {}).get("model_variant"),
+        "backbone_type": data.get("metadata", {}).get("backbone_type"),
+        "loss_balance_mode": data.get("metadata", {}).get("loss_balance_mode"),
         "overall_mse": recon.get("overall_mse"),
         "corrupted_region_mse": recon.get("corrupted_region_mse"),
         "clean_region_mse": recon.get("clean_region_mse"),
@@ -157,13 +190,19 @@ def maybe_add_multitask(rows: list[dict], path: str, label: str | None = None) -
 
 
 def write_markdown(path: str, rows: list[dict]) -> None:
-    headers = ["method", *METRICS]
+    headers = ["method", *METADATA_FIELDS, *METRICS]
     lines = [
         "| " + " | ".join(headers) + " |",
         "| " + " | ".join(["---"] * len(headers)) + " |",
     ]
     for row in rows:
-        lines.append("| " + " | ".join([row["method"], *[fmt(row.get(key)) for key in METRICS]]) + " |")
+        lines.append(
+            "| "
+            + " | ".join(
+                [row["method"], *[fmt(row.get(key)) for key in METADATA_FIELDS], *[fmt(row.get(key)) for key in METRICS]]
+            )
+            + " |"
+        )
     with open(path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
 
@@ -197,6 +236,12 @@ def main() -> None:
         default="",
     )
     parser.add_argument(
+        "--multitask_metrics",
+        nargs="*",
+        default=[],
+        help="Additional multitask metrics json files to include in the comparison table.",
+    )
+    parser.add_argument(
         "--output_dir",
         type=str,
         default=str(ARTIFACTS_ROOT / "results" / "physiological_multitask" / "comparison"),
@@ -219,10 +264,12 @@ def main() -> None:
     maybe_add_multitask(rows, args.v2_2_metrics, label="Physiological multitask v2.2 (gt-mask constrained editing)")
     maybe_add_multitask(rows, args.v3_metrics, label="Physiological multitask v3 (pred-mask constrained editing)")
     maybe_add_multitask(rows, args.v2_metrics, label="Physiological multitask v2 (gt-mask auxiliary)")
+    for path in args.multitask_metrics:
+        maybe_add_multitask(rows, path)
 
     csv_path = os.path.join(output_dir, "physiological_multitask_comparison.csv")
     with open(csv_path, "w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=["method", "source", *METRICS])
+        writer = csv.DictWriter(f, fieldnames=["method", "source", *METADATA_FIELDS, *METRICS])
         writer.writeheader()
         writer.writerows(rows)
 

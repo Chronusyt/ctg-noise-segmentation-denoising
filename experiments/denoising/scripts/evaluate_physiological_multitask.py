@@ -78,6 +78,27 @@ def infer_gate_mode(args: argparse.Namespace, ckpt: dict) -> str:
     return ckpt.get("config", {}).get("gate_mode", "none")
 
 
+def infer_model_variant(ckpt: dict) -> str:
+    model_variant = ckpt.get("config", {}).get("model_variant", "legacy_single_residual")
+    if model_variant in {"legacy_single_residual", "expert_residual"}:
+        return model_variant
+    return "legacy_single_residual"
+
+
+def infer_backbone_type(ckpt: dict) -> str:
+    backbone_type = ckpt.get("config", {}).get("backbone_type", "unet")
+    if backbone_type in {"unet", "modern_tcn"}:
+        return backbone_type
+    return "unet"
+
+
+def infer_loss_balance_mode(ckpt: dict) -> str:
+    loss_balance_mode = ckpt.get("config", {}).get("loss_balance_mode", "static")
+    if loss_balance_mode in {"static", "gradnorm"}:
+        return loss_balance_mode
+    return "static"
+
+
 def make_model_from_checkpoint(ckpt: dict, input_mode: str) -> UNet1DPhysiologicalMultitask:
     config = ckpt.get("config", {})
     in_channels = int(config.get("in_channels", 6 if input_mode in {"gt_mask", "pred_mask"} else 1))
@@ -88,6 +109,11 @@ def make_model_from_checkpoint(ckpt: dict, input_mode: str) -> UNet1DPhysiologic
         scalar_hidden_channels=int(config.get("scalar_hidden_channels", 128)),
         dropout=float(config.get("dropout", 0.0)),
         residual_reconstruction=bool(config.get("residual_reconstruction", True)),
+        model_variant=infer_model_variant(ckpt),
+        backbone_type=infer_backbone_type(ckpt),
+        modern_tcn_blocks_per_stage=int(config.get("modern_tcn_blocks_per_stage", 2)),
+        modern_tcn_kernel_size=int(config.get("modern_tcn_kernel_size", 5)),
+        modern_tcn_expansion=int(config.get("modern_tcn_expansion", 2)),
     )
 
 
@@ -624,10 +650,16 @@ def main() -> None:
         raise KeyError("Checkpoint missing label_stats")
     input_mode = infer_input_mode(args, ckpt)
     gate_mode = infer_gate_mode(args, ckpt)
+    model_variant = infer_model_variant(ckpt)
+    backbone_type = infer_backbone_type(ckpt)
+    loss_balance_mode = infer_loss_balance_mode(ckpt)
     boundary_k = args.boundary_k if args.boundary_k >= 0 else int(ckpt_config.get("boundary_k", 5))
     acc_threshold = args.acc_threshold if args.acc_threshold >= 0 else args.threshold
     dec_threshold = args.dec_threshold if args.dec_threshold >= 0 else args.threshold
     print(f"输入模式: {input_mode}", flush=True)
+    print(f"模型变体: {model_variant}", flush=True)
+    print(f"backbone: {backbone_type}", flush=True)
+    print(f"loss balance: {loss_balance_mode}", flush=True)
     print(f"pred mask cache: {args.pred_mask_cache_dir or 'embedded_or_none'}", flush=True)
     print(f"pred mask variant: {args.pred_mask_variant}", flush=True)
     print(f"gate 模式: {gate_mode}", flush=True)
@@ -657,7 +689,10 @@ def main() -> None:
             "pred_mask_variant": args.pred_mask_variant,
             "gate_mode": gate_mode,
             "boundary_k": boundary_k,
-            "model_variant": ckpt_config.get("model_variant", ""),
+            "model_variant": model_variant,
+            "backbone_type": backbone_type,
+            "loss_balance_mode": loss_balance_mode,
+            "experiment_variant": ckpt_config.get("experiment_variant", ckpt_config.get("model_variant", "")),
         },
         "reconstruction": reconstruction_metrics(preds["reconstruction"], data["clean_signals"], region_masks),
         "event_prediction": {

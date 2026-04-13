@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import OrderedDict
 import csv
 import json
 import os
@@ -24,11 +25,21 @@ for _path in (_REPO_ROOT, _SRC_ROOT):
 
 from ctg_pipeline.data.multitask_dataset import ClinicalMultitaskDataset
 from ctg_pipeline.models.unet1d_physiological_multitask import UNet1DPhysiologicalMultitask
+from ctg_pipeline.utils.gradnorm import GradNormBalancer
 from ctg_pipeline.utils.editing import build_edit_gate_torch, compute_region_masks_torch
 from ctg_pipeline.utils.pathing import ARTIFACTS_ROOT, DENOISING_DATASETS_ROOT, resolve_repo_path
 
 
 SCALAR_KEYS = ("baseline", "stv", "ltv", "baseline_variability")
+TASK_LOSS_KEYS = (
+    "reconstruction",
+    "acc",
+    "dec",
+    "baseline",
+    "stv",
+    "ltv",
+    "baseline_variability",
+)
 
 
 def set_seed(seed: int) -> None:
@@ -73,6 +84,28 @@ def compute_pos_weight(arr: np.ndarray, max_pos_weight: float) -> float:
 
 def positive_ratio(arr: np.ndarray) -> float:
     return float(np.asarray(arr, dtype=np.float32).mean())
+
+
+def build_task_loss_weights(args: argparse.Namespace) -> OrderedDict[str, float]:
+    return OrderedDict(
+        [
+            ("reconstruction", float(args.reconstruction_weight)),
+            ("acc", float(args.acc_weight)),
+            ("dec", float(args.dec_weight)),
+            ("baseline", float(args.baseline_weight)),
+            ("stv", float(args.stv_weight)),
+            ("ltv", float(args.ltv_weight)),
+            ("baseline_variability", float(args.bv_weight)),
+        ]
+    )
+
+
+def compute_static_total(losses: Dict[str, torch.Tensor], args: argparse.Namespace) -> torch.Tensor:
+    task_weights = build_task_loss_weights(args)
+    total = torch.zeros((), device=losses["reconstruction"].device, dtype=losses["reconstruction"].dtype)
+    for key, weight in task_weights.items():
+        total = total + float(weight) * losses[key]
+    return total
 
 
 def normalize_scalar(batch: dict, key: str, label_stats: Dict[str, Dict[str, float]], device: str) -> torch.Tensor:
@@ -267,16 +300,42 @@ def compute_losses(
             ),
         }
     )
-    losses["total"] = (
-        args.reconstruction_weight * losses["reconstruction"]
-        + args.acc_weight * losses["acc"]
-        + args.dec_weight * losses["dec"]
-        + args.baseline_weight * losses["baseline"]
-        + args.stv_weight * losses["stv"]
-        + args.ltv_weight * losses["ltv"]
-        + args.bv_weight * losses["baseline_variability"]
-    )
+    losses["total"] = compute_static_total(losses, args)
     return losses
+
+
+def task_loss_dict(losses: Dict[str, torch.Tensor]) -> OrderedDict[str, torch.Tensor]:
+    return OrderedDict((key, losses[key]) for key in TASK_LOSS_KEYS)
+
+
+def current_balance_weights(
+    args: argparse.Namespace,
+    gradnorm_balancer: GradNormBalancer | None,
+) -> OrderedDict[str, float]:
+    if gradnorm_balancer is None or args.loss_balance_mode != "gradnorm":
+        return build_task_loss_weights(args)
+    weights = gradnorm_balancer.normalized_weights().detach().cpu().tolist()
+    return OrderedDict((key, float(weights[idx])) for idx, key in enumerate(gradnorm_balancer.task_keys))
+
+
+def balance_losses(
+    losses: Dict[str, torch.Tensor],
+    args: argparse.Namespace,
+    gradnorm_balancer: GradNormBalancer | None,
+    reference_parameter: torch.nn.Parameter | None,
+    is_train: bool,
+) -> tuple[torch.Tensor, OrderedDict[str, float], torch.Tensor | None]:
+    if gradnorm_balancer is None or args.loss_balance_mode != "gradnorm":
+        return losses["total"], current_balance_weights(args, gradnorm_balancer), None
+
+    task_losses = task_loss_dict(losses)
+    total, weight_map = gradnorm_balancer.weighted_total(task_losses, detach_weights=True)
+    gradnorm_loss = None
+    if is_train:
+        if reference_parameter is None:
+            raise ValueError("GradNorm requires a reference parameter from the shared backbone")
+        gradnorm_loss = gradnorm_balancer.gradnorm_loss(task_losses, reference_parameter)
+    return total, weight_map, gradnorm_loss
 
 
 def run_epoch(
@@ -288,6 +347,8 @@ def run_epoch(
     dec_loss_fn: nn.Module,
     args: argparse.Namespace,
     optimizer: torch.optim.Optimizer | None = None,
+    gradnorm_balancer: GradNormBalancer | None = None,
+    gradnorm_optimizer: torch.optim.Optimizer | None = None,
 ) -> Dict[str, float]:
     is_train = optimizer is not None
     model.train(is_train)
@@ -312,14 +373,36 @@ def run_epoch(
         edit_gate = build_edit_gate(batch, device, args.input_mode, args)
         if is_train:
             optimizer.zero_grad(set_to_none=True)
+            if gradnorm_optimizer is not None:
+                gradnorm_optimizer.zero_grad(set_to_none=True)
         with torch.set_grad_enabled(is_train):
             outputs = model(x, edit_gate=edit_gate)
             losses = compute_losses(outputs, batch, device, label_stats, acc_loss_fn, dec_loss_fn, args)
+            total_loss, _weight_map, gradnorm_loss = balance_losses(
+                losses,
+                args,
+                gradnorm_balancer,
+                model.gradnorm_reference_parameter() if hasattr(model, "gradnorm_reference_parameter") else None,
+                is_train=is_train,
+            )
+            losses["total"] = total_loss
             if is_train:
+                gradnorm_grad = None
+                if gradnorm_loss is not None and gradnorm_balancer is not None and gradnorm_optimizer is not None:
+                    gradnorm_grad = torch.autograd.grad(
+                        gradnorm_loss,
+                        gradnorm_balancer.log_task_weights,
+                        retain_graph=True,
+                        allow_unused=False,
+                    )[0]
                 losses["total"].backward()
                 if args.clip_grad_norm > 0:
                     torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad_norm)
                 optimizer.step()
+                if gradnorm_grad is not None and gradnorm_balancer is not None and gradnorm_optimizer is not None:
+                    gradnorm_balancer.log_task_weights.grad = gradnorm_grad
+                    gradnorm_optimizer.step()
+                    gradnorm_balancer.renormalize_()
         for key in totals:
             totals[key] += float(losses[key].detach().cpu())
         n_batches += 1
@@ -397,7 +480,7 @@ def append_train_log(path: str, epoch: int, lr: float, train: dict, val: dict) -
         )
 
 
-def infer_model_variant(args: argparse.Namespace) -> str:
+def infer_experiment_variant(args: argparse.Namespace) -> str:
     if args.input_mode == "no_mask":
         return "physiological_multitask_v1_no_mask"
     if args.input_mode == "gt_mask" and args.gate_mode == "none":
@@ -423,6 +506,21 @@ def main() -> None:
     )
     parser.add_argument("--input_mode", choices=["no_mask", "gt_mask", "pred_mask"], default="no_mask")
     parser.add_argument(
+        "--model_variant",
+        choices=["legacy_single_residual", "expert_residual"],
+        default="legacy_single_residual",
+    )
+    parser.add_argument(
+        "--backbone_type",
+        choices=["unet", "modern_tcn"],
+        default="unet",
+    )
+    parser.add_argument(
+        "--loss_balance_mode",
+        choices=["static", "gradnorm"],
+        default="static",
+    )
+    parser.add_argument(
         "--pred_mask_cache_dir",
         type=str,
         default="",
@@ -447,6 +545,9 @@ def main() -> None:
     parser.add_argument("--depth", type=int, default=3)
     parser.add_argument("--scalar_hidden_channels", type=int, default=128)
     parser.add_argument("--dropout", type=float, default=0.0)
+    parser.add_argument("--modern_tcn_blocks_per_stage", type=int, default=2)
+    parser.add_argument("--modern_tcn_kernel_size", type=int, default=5)
+    parser.add_argument("--modern_tcn_expansion", type=int, default=2)
     parser.add_argument(
         "--no_residual_reconstruction",
         action="store_true",
@@ -475,6 +576,8 @@ def main() -> None:
     parser.add_argument("--acc_pos_weight", type=float, default=0.0, help="0 means compute from train labels")
     parser.add_argument("--dec_pos_weight", type=float, default=0.0, help="0 means compute from train labels")
     parser.add_argument("--max_pos_weight", type=float, default=50.0)
+    parser.add_argument("--gradnorm_alpha", type=float, default=1.5)
+    parser.add_argument("--gradnorm_lr", type=float, default=1e-2)
     parser.add_argument("--clip_grad_norm", type=float, default=5.0)
     parser.add_argument("--max_train_samples", type=int, default=0, help="Debug only; 0 means full train split")
     parser.add_argument("--max_val_samples", type=int, default=0, help="Debug only; 0 means full val split")
@@ -491,6 +594,9 @@ def main() -> None:
     print("Physiological multitask 训练启动", flush=True)
     print(f"使用设备: {device}", flush=True)
     print(f"输入模式: {args.input_mode}", flush=True)
+    print(f"模型变体: {args.model_variant}", flush=True)
+    print(f"backbone: {args.backbone_type}", flush=True)
+    print(f"loss balance: {args.loss_balance_mode}", flush=True)
     print(f"pred mask cache: {args.pred_mask_cache_dir or 'embedded_or_none'}", flush=True)
     print(f"pred mask variant: {args.pred_mask_variant}", flush=True)
     print(f"gate 模式: {args.gate_mode}", flush=True)
@@ -500,6 +606,8 @@ def main() -> None:
     print(f"loss mask source: {args.loss_mask_source}", flush=True)
     print(f"事件损失: acc={args.acc_event_loss}, dec={args.dec_event_loss}", flush=True)
     print(f"数据目录: {args.data_dir}", flush=True)
+    if args.input_mode == "no_mask" and args.model_variant == "expert_residual":
+        print("no_mask 模式下 expert_residual 将退化为单 residual 路径", flush=True)
 
     train_path = os.path.join(args.data_dir, "train_dataset_multitask.npz")
     val_path = os.path.join(args.data_dir, "val_dataset_multitask.npz")
@@ -550,8 +658,26 @@ def main() -> None:
         scalar_hidden_channels=args.scalar_hidden_channels,
         dropout=args.dropout,
         residual_reconstruction=not args.no_residual_reconstruction,
+        model_variant=args.model_variant,
+        backbone_type=args.backbone_type,
+        modern_tcn_blocks_per_stage=args.modern_tcn_blocks_per_stage,
+        modern_tcn_kernel_size=args.modern_tcn_kernel_size,
+        modern_tcn_expansion=args.modern_tcn_expansion,
     ).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    gradnorm_balancer = None
+    gradnorm_optimizer = None
+    if args.loss_balance_mode == "gradnorm":
+        gradnorm_balancer = GradNormBalancer(
+            task_keys=TASK_LOSS_KEYS,
+            initial_weights=build_task_loss_weights(args),
+            alpha=args.gradnorm_alpha,
+        ).to(device)
+        gradnorm_optimizer = torch.optim.AdamW(
+            [gradnorm_balancer.log_task_weights],
+            lr=args.gradnorm_lr,
+            weight_decay=0.0,
+        )
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=5)
     acc_loss_fn = BinaryEventLoss(
         args.acc_event_loss,
@@ -568,7 +694,7 @@ def main() -> None:
         device=device,
     )
 
-    model_variant = infer_model_variant(args)
+    experiment_variant = infer_experiment_variant(args)
     config = vars(args).copy()
     config.update(
         {
@@ -579,9 +705,14 @@ def main() -> None:
             "acc_positive_ratio": acc_positive_ratio,
             "dec_positive_ratio": dec_positive_ratio,
             "model_class": "UNet1DPhysiologicalMultitask",
-            "model_variant": model_variant,
+            "model_variant": args.model_variant,
+            "backbone_type": args.backbone_type,
+            "loss_balance_mode": args.loss_balance_mode,
+            "experiment_variant": experiment_variant,
             "in_channels": in_channels,
             "residual_reconstruction": not args.no_residual_reconstruction,
+            "task_loss_keys": list(TASK_LOSS_KEYS),
+            "task_loss_weights": dict(build_task_loss_weights(args)),
         }
     )
     with open(os.path.join(args.output_dir, "config.json"), "w", encoding="utf-8") as f:
@@ -594,15 +725,42 @@ def main() -> None:
 
     for epoch in range(1, args.epochs + 1):
         train_metrics = run_epoch(
-            model, train_loader, device, label_stats, acc_loss_fn, dec_loss_fn, args, optimizer=optimizer
+            model,
+            train_loader,
+            device,
+            label_stats,
+            acc_loss_fn,
+            dec_loss_fn,
+            args,
+            optimizer=optimizer,
+            gradnorm_balancer=gradnorm_balancer,
+            gradnorm_optimizer=gradnorm_optimizer,
         )
         val_metrics = run_epoch(
-            model, val_loader, device, label_stats, acc_loss_fn, dec_loss_fn, args, optimizer=None
+            model,
+            val_loader,
+            device,
+            label_stats,
+            acc_loss_fn,
+            dec_loss_fn,
+            args,
+            optimizer=None,
+            gradnorm_balancer=gradnorm_balancer,
+            gradnorm_optimizer=None,
         )
         scheduler.step(val_metrics["total"])
         lr = float(optimizer.param_groups[0]["lr"])
+        balance_weights = current_balance_weights(args, gradnorm_balancer)
         append_train_log(train_log_path, epoch, lr, train_metrics, val_metrics)
-        history.append({"epoch": epoch, "lr": lr, "train": train_metrics, "val": val_metrics})
+        history.append(
+            {
+                "epoch": epoch,
+                "lr": lr,
+                "train": train_metrics,
+                "val": val_metrics,
+                "balance_weights": balance_weights,
+            }
+        )
 
         message = (
             f"Epoch {epoch}: "
@@ -623,6 +781,11 @@ def main() -> None:
             f"val_baseline={val_metrics['baseline']:.4f}, val_stv={val_metrics['stv']:.4f}, "
             f"val_ltv={val_metrics['ltv']:.4f}, val_bv={val_metrics['baseline_variability']:.4f}"
         )
+        if args.loss_balance_mode == "gradnorm":
+            message += (
+                " | weights="
+                + ",".join(f"{key}:{value:.3f}" for key, value in balance_weights.items())
+            )
         if val_metrics["total"] < best_val:
             best_val = val_metrics["total"]
             torch.save(
@@ -633,6 +796,11 @@ def main() -> None:
                     "val_metrics": val_metrics,
                     "config": config,
                     "label_stats": label_stats,
+                    "gradnorm_state_dict": gradnorm_balancer.state_dict() if gradnorm_balancer is not None else None,
+                    "gradnorm_optimizer_state_dict": (
+                        gradnorm_optimizer.state_dict() if gradnorm_optimizer is not None else None
+                    ),
+                    "balance_weights": balance_weights,
                 },
                 os.path.join(args.output_dir, "best_model.pt"),
             )
@@ -647,6 +815,11 @@ def main() -> None:
                 "val_metrics": val_metrics,
                 "config": config,
                 "label_stats": label_stats,
+                "gradnorm_state_dict": gradnorm_balancer.state_dict() if gradnorm_balancer is not None else None,
+                "gradnorm_optimizer_state_dict": (
+                    gradnorm_optimizer.state_dict() if gradnorm_optimizer is not None else None
+                ),
+                "balance_weights": balance_weights,
             },
             os.path.join(args.output_dir, "last_model.pt"),
         )
