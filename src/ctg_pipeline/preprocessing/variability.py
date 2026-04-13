@@ -14,8 +14,11 @@ Epoch:
     At 2 Hz sampling → 7.5 → rounded to 8 samples per epoch.
 
 STV (Short-Term Variability) overall:
-    Mean absolute difference of consecutive epoch mean pulse intervals.
-        STV = mean( |PI_epoch[i+1] − PI_epoch[i]| )
+    First compute STV within each valid 1-minute window.
+    For each minute (16 epochs at 3.75 s):
+        STV_minute = mean_j( |PI_epoch[j] − PI_epoch[j−1]| ), j=1..15
+    Then:
+        STV overall = mean(STV_minute)
     Unit: ms
 
 LTV (Long-Term Variability) overall:
@@ -52,18 +55,31 @@ class STVConfig:
     Attributes:
         sampling_rate:      Sampling rate in Hz (default 4).
         epoch_sec:          Epoch duration in seconds (default 3.75 = 1/16 min).
+        minute_sec:         Minute window duration in seconds (default 60).
         min_valid_ratio:    Minimum fraction of valid samples required per epoch.
+        min_valid_epochs_ratio:
+                            Minimum fraction of valid epochs required per minute.
         interpolate_output: If True, linearly interpolate NaN gaps in the
                             sample-level output array.
     """
     sampling_rate: float = 4.0
     epoch_sec: float = 3.75
+    minute_sec: float = 60.0
     min_valid_ratio: float = 0.5
+    min_valid_epochs_ratio: float = 0.5
     interpolate_output: bool = True
 
     @property
     def epoch_samples(self) -> int:
         return int(round(self.epoch_sec * self.sampling_rate))
+
+    @property
+    def epochs_per_minute(self) -> int:
+        return int(round(self.minute_sec / self.epoch_sec))
+
+    @property
+    def minute_samples(self) -> int:
+        return int(round(self.minute_sec * self.sampling_rate))
 
 
 @dataclass
@@ -241,7 +257,7 @@ def _interpolate_nans(x: np.ndarray) -> np.ndarray:
 # STV — Short-Term Variability
 # =============================================================================
 
-def compute_stv_epochs(
+def compute_stv_minutes(
     fhr: np.ndarray,
     acc_mask: Optional[np.ndarray] = None,
     dec_mask: Optional[np.ndarray] = None,
@@ -249,12 +265,12 @@ def compute_stv_epochs(
     config: Optional[STVConfig] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Compute epoch-level STV.
+    Compute minute-level STV using the strict minute-first definition.
 
     Returns:
-        epoch_pi:   Mean pulse interval per epoch (ms).
-        stv_epochs: |PI[i] − PI[i−1]| per epoch (ms).
-                    stv_epochs[0] is always NaN (no predecessor).
+        epoch_pi:    Mean pulse interval per epoch (ms).
+        stv_minutes: Mean adjacent-epoch absolute PI differences per minute (ms).
+                     NaN for minutes with insufficient valid epochs/differences.
     """
     if config is None:
         config = STVConfig()
@@ -267,13 +283,30 @@ def compute_stv_epochs(
         fhr, valid, config.epoch_samples, config.min_valid_ratio,
     )
 
+    epm = config.epochs_per_minute
     n_epochs = len(epoch_pi)
-    stv_epochs = np.full(n_epochs, np.nan, dtype=np.float64)
-    for i in range(1, n_epochs):
-        if np.isfinite(epoch_pi[i]) and np.isfinite(epoch_pi[i - 1]):
-            stv_epochs[i] = abs(epoch_pi[i] - epoch_pi[i - 1])
+    n_minutes = n_epochs // epm
+    min_valid_epochs = max(1, int(np.ceil(epm * config.min_valid_epochs_ratio)))
 
-    return epoch_pi, stv_epochs
+    stv_min = np.full(n_minutes, np.nan, dtype=np.float64)
+    for i in range(n_minutes):
+        start = i * epm
+        end = start + epm
+        minute_pi = epoch_pi[start:end]
+
+        valid_epochs = np.isfinite(minute_pi)
+        if np.sum(valid_epochs) < min_valid_epochs:
+            continue
+
+        # Adjacent epoch differences *within* this minute only
+        minute_diffs = np.abs(np.diff(minute_pi))
+        valid_diffs = minute_diffs[np.isfinite(minute_diffs)]
+        if len(valid_diffs) == 0:
+            continue
+
+        stv_min[i] = float(np.mean(valid_diffs))
+
+    return epoch_pi, stv_min
 
 
 def compute_stv(
@@ -284,10 +317,9 @@ def compute_stv(
     config: Optional[STVConfig] = None,
 ) -> np.ndarray:
     """
-    Compute STV and return a **sample-level** array (ms).
+    Compute STV and return a **sample-level** array (ms), minute-wise.
 
-    Each sample inherits the STV value of its epoch (the epoch-to-epoch
-    difference ending at that epoch).
+    Each sample inherits the STV value of its 1-minute window.
 
     Returns:
         1-D array, same length as *fhr*, unit: ms.
@@ -296,11 +328,11 @@ def compute_stv(
         config = STVConfig()
 
     fhr = np.asarray(fhr, dtype=np.float64)
-    _, stv_epochs = compute_stv_epochs(
+    _, stv_min = compute_stv_minutes(
         fhr, acc_mask, dec_mask, quality_mask, config,
     )
 
-    stv = _expand_to_samples(stv_epochs, config.epoch_samples, len(fhr))
+    stv = _expand_to_samples(stv_min, config.minute_samples, len(fhr))
 
     if config.interpolate_output:
         stv = _interpolate_nans(stv)
@@ -318,15 +350,16 @@ def compute_stv_overall(
     """
     Compute **STV overall** — a single scalar (ms).
 
-    STV overall = mean( |PI_epoch[i+1] − PI_epoch[i]| )
+    STV overall = mean(STV_minute), where each STV_minute is computed
+    as the mean adjacent-epoch absolute PI difference within one minute.
 
     Returns:
         STV overall in ms, or NaN if insufficient data.
     """
-    _, stv_epochs = compute_stv_epochs(
+    _, stv_min = compute_stv_minutes(
         fhr, acc_mask, dec_mask, quality_mask, config,
     )
-    valid = stv_epochs[np.isfinite(stv_epochs)]
+    valid = stv_min[np.isfinite(stv_min)]
     if len(valid) == 0:
         return float(np.nan)
     return float(np.mean(valid))
