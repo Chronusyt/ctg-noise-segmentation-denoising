@@ -21,7 +21,7 @@ for _path in (_REPO_ROOT, _SRC_ROOT):
 
 from ctg_pipeline.features.physiology import FeatureConfig, compute_multitask_physiology_labels
 from ctg_pipeline.data.multitask_dataset import load_multitask_arrays
-from ctg_pipeline.models.unet1d_physiological_multitask import UNet1DPhysiologicalMultitask
+from ctg_pipeline.models.unet1d_physiological_multitask import ARTIFACT_CLASS_ORDER, UNet1DPhysiologicalMultitask
 from ctg_pipeline.utils.editing import build_edit_gate_torch, compute_region_masks_torch
 from ctg_pipeline.utils.pathing import ARTIFACTS_ROOT, DENOISING_DATASETS_ROOT, resolve_repo_path
 
@@ -80,14 +80,14 @@ def infer_gate_mode(args: argparse.Namespace, ckpt: dict) -> str:
 
 def infer_model_variant(ckpt: dict) -> str:
     model_variant = ckpt.get("config", {}).get("model_variant", "legacy_single_residual")
-    if model_variant in {"legacy_single_residual", "expert_residual"}:
+    if model_variant in {"legacy_single_residual", "expert_residual", "typed_scale_residual"}:
         return model_variant
     return "legacy_single_residual"
 
 
 def infer_backbone_type(ckpt: dict) -> str:
     backbone_type = ckpt.get("config", {}).get("backbone_type", "unet")
-    if backbone_type in {"unet", "modern_tcn"}:
+    if backbone_type in {"unet", "modern_tcn", "multiscale_tcn_unet"}:
         return backbone_type
     return "unet"
 
@@ -97,6 +97,13 @@ def infer_loss_balance_mode(ckpt: dict) -> str:
     if loss_balance_mode in {"static", "gradnorm"}:
         return loss_balance_mode
     return "static"
+
+
+def infer_bottleneck_type(ckpt: dict) -> str:
+    bottleneck_type = ckpt.get("config", {}).get("bottleneck_type", "none")
+    if bottleneck_type in {"none", "mhsa"}:
+        return bottleneck_type
+    return "none"
 
 
 def make_model_from_checkpoint(ckpt: dict, input_mode: str) -> UNet1DPhysiologicalMultitask:
@@ -111,6 +118,7 @@ def make_model_from_checkpoint(ckpt: dict, input_mode: str) -> UNet1DPhysiologic
         residual_reconstruction=bool(config.get("residual_reconstruction", True)),
         model_variant=infer_model_variant(ckpt),
         backbone_type=infer_backbone_type(ckpt),
+        bottleneck_type=infer_bottleneck_type(ckpt),
         modern_tcn_blocks_per_stage=int(config.get("modern_tcn_blocks_per_stage", 2)),
         modern_tcn_kernel_size=int(config.get("modern_tcn_kernel_size", 5)),
         modern_tcn_expansion=int(config.get("modern_tcn_expansion", 2)),
@@ -223,6 +231,17 @@ def reconstruction_metrics(pred: np.ndarray, clean: np.ndarray, region_masks: Di
     out.update(masked_error_stats(pred, clean, region_masks["clean"], "clean_region"))
     out.update(masked_error_stats(pred, clean, region_masks["boundary_near_clean"], "boundary_near_clean"))
     out.update(masked_error_stats(pred, clean, region_masks["far_clean"], "far_from_mask_clean"))
+    return out
+
+
+def artifact_reconstruction_metrics(pred: np.ndarray, clean: np.ndarray, masks: np.ndarray) -> Dict[str, float]:
+    out: Dict[str, float] = {}
+    for idx, name in enumerate(ARTIFACT_CLASS_ORDER):
+        out.update(masked_error_stats(pred, clean, masks[..., idx], f"{name}_region"))
+    scale_mask = np.max(masks[..., :2], axis=-1)
+    other_mask = np.max(masks[..., 2:], axis=-1)
+    out.update(masked_error_stats(pred, clean, scale_mask, "scale_artifact"))
+    out.update(masked_error_stats(pred, clean, other_mask, "other_artifact"))
     return out
 
 
@@ -653,12 +672,16 @@ def main() -> None:
     model_variant = infer_model_variant(ckpt)
     backbone_type = infer_backbone_type(ckpt)
     loss_balance_mode = infer_loss_balance_mode(ckpt)
+    bottleneck_type = infer_bottleneck_type(ckpt)
     boundary_k = args.boundary_k if args.boundary_k >= 0 else int(ckpt_config.get("boundary_k", 5))
     acc_threshold = args.acc_threshold if args.acc_threshold >= 0 else args.threshold
     dec_threshold = args.dec_threshold if args.dec_threshold >= 0 else args.threshold
+    if model_variant == "typed_scale_residual" and input_mode != "pred_mask":
+        raise ValueError("typed_scale_residual checkpoint 第一版只支持 pred_mask 评估")
     print(f"输入模式: {input_mode}", flush=True)
     print(f"模型变体: {model_variant}", flush=True)
     print(f"backbone: {backbone_type}", flush=True)
+    print(f"bottleneck: {bottleneck_type}", flush=True)
     print(f"loss balance: {loss_balance_mode}", flush=True)
     print(f"pred mask cache: {args.pred_mask_cache_dir or 'embedded_or_none'}", flush=True)
     print(f"pred mask variant: {args.pred_mask_variant}", flush=True)
@@ -691,10 +714,17 @@ def main() -> None:
             "boundary_k": boundary_k,
             "model_variant": model_variant,
             "backbone_type": backbone_type,
+            "bottleneck_type": bottleneck_type,
             "loss_balance_mode": loss_balance_mode,
             "experiment_variant": ckpt_config.get("experiment_variant", ckpt_config.get("model_variant", "")),
+            "artifact_class_order": ckpt_config.get("artifact_class_order", list(ARTIFACT_CLASS_ORDER)),
         },
         "reconstruction": reconstruction_metrics(preds["reconstruction"], data["clean_signals"], region_masks),
+        "artifact_reconstruction": artifact_reconstruction_metrics(
+            preds["reconstruction"],
+            data["clean_signals"],
+            data["masks"],
+        ),
         "event_prediction": {
             "acceleration": binary_metrics(preds["acc_logits"], data["acc_labels"], acc_threshold),
             "deceleration": binary_metrics(preds["dec_logits"], data["dec_labels"], dec_threshold),

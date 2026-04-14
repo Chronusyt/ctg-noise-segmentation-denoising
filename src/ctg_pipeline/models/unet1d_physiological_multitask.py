@@ -17,6 +17,9 @@ Supported residual heads:
     expert_residual:
         five artifact-specific residual experts fused by mask channels
         (falls back to the legacy path when no mask channels are present)
+    typed_scale_residual:
+        halving / doubling affine-style scale heads + shared residual head for
+        mhr / missing / spike
 """
 from __future__ import annotations
 
@@ -27,15 +30,20 @@ import torch.nn as nn
 
 try:
     from .modern_tcn_backbone import ModernTCNBackbone1D
+    from .multiscale_tcn_unet_backbone import MultiscaleTCNUNetBackbone1D
     from .unet1d_denoiser import DoubleConv1D
 except ImportError:  # Allow standalone smoke tests.
     from modern_tcn_backbone import ModernTCNBackbone1D
+    from multiscale_tcn_unet_backbone import MultiscaleTCNUNetBackbone1D
     from unet1d_denoiser import DoubleConv1D
 
 
-NUM_EXPERTS = 5
-MODEL_VARIANTS = {"legacy_single_residual", "expert_residual"}
-BACKBONE_TYPES = {"unet", "modern_tcn"}
+ARTIFACT_CLASS_ORDER = ("halving", "doubling", "mhr", "missing", "spike")
+NUM_EXPERTS = len(ARTIFACT_CLASS_ORDER)
+NUM_TYPED_BRANCHES = 3
+MODEL_VARIANTS = {"legacy_single_residual", "expert_residual", "typed_scale_residual"}
+BACKBONE_TYPES = {"unet", "modern_tcn", "multiscale_tcn_unet"}
+BOTTLENECK_TYPES = {"none", "mhsa"}
 
 
 def _normalize_model_variant(model_variant: str) -> str:
@@ -84,6 +92,7 @@ class UNet1DPhysiologicalMultitask(nn.Module):
         residual_reconstruction: bool = True,
         model_variant: str = "legacy_single_residual",
         backbone_type: str = "unet",
+        bottleneck_type: str = "none",
         modern_tcn_blocks_per_stage: int = 2,
         modern_tcn_kernel_size: int = 5,
         modern_tcn_expansion: int = 2,
@@ -96,7 +105,10 @@ class UNet1DPhysiologicalMultitask(nn.Module):
         self.model_variant = _normalize_model_variant(model_variant)
         if backbone_type not in BACKBONE_TYPES:
             raise ValueError(f"Unsupported backbone_type: {backbone_type}")
+        if bottleneck_type not in BOTTLENECK_TYPES:
+            raise ValueError(f"Unsupported bottleneck_type: {bottleneck_type}")
         self.backbone_type = backbone_type
+        self.bottleneck_type = bottleneck_type
         self.num_experts = NUM_EXPERTS
 
         if self.backbone_type == "unet":
@@ -122,7 +134,8 @@ class UNet1DPhysiologicalMultitask(nn.Module):
             time_channels = ch
             global_channels = bottleneck_ch
             self.shared_backbone = None
-        else:
+            self.multiscale_tcn_unet_backbone = None
+        elif self.backbone_type == "modern_tcn":
             self.shared_backbone = ModernTCNBackbone1D(
                 in_channels=in_channels,
                 base_channels=base_channels,
@@ -132,10 +145,23 @@ class UNet1DPhysiologicalMultitask(nn.Module):
                 expansion=modern_tcn_expansion,
                 dropout=dropout,
             )
+            self.multiscale_tcn_unet_backbone = None
             time_channels = self.shared_backbone.out_channels
             global_channels = self.shared_backbone.out_channels
+        else:
+            self.shared_backbone = None
+            self.multiscale_tcn_unet_backbone = MultiscaleTCNUNetBackbone1D(
+                in_channels=in_channels,
+                base_channels=base_channels,
+                depth=depth,
+                dropout=dropout,
+                bottleneck_type=bottleneck_type,
+            )
+            time_channels = self.multiscale_tcn_unet_backbone.time_channels
+            global_channels = self.multiscale_tcn_unet_backbone.global_channels
 
-        # Keep the historical single residual head for compatibility and no-mask fallback.
+        # Keep the historical single residual head for compatibility and for the
+        # multiscale-backbone shared-residual ablation.
         self.reconstruction_head = nn.Conv1d(time_channels, 1, kernel_size=1)
         if self.model_variant == "expert_residual":
             self.expert_reconstruction_heads = nn.ModuleList(
@@ -143,6 +169,19 @@ class UNet1DPhysiologicalMultitask(nn.Module):
             )
         else:
             self.expert_reconstruction_heads = None
+
+        if self.model_variant == "typed_scale_residual":
+            self.halving_scale_head = nn.Conv1d(time_channels, 1, kernel_size=1)
+            self.halving_bias_head = nn.Conv1d(time_channels, 1, kernel_size=1)
+            self.doubling_scale_head = nn.Conv1d(time_channels, 1, kernel_size=1)
+            self.doubling_bias_head = nn.Conv1d(time_channels, 1, kernel_size=1)
+            self.other_shared_head = nn.Conv1d(time_channels, 1, kernel_size=1)
+        else:
+            self.halving_scale_head = None
+            self.halving_bias_head = None
+            self.doubling_scale_head = None
+            self.doubling_bias_head = None
+            self.other_shared_head = None
 
         self.acceleration_head = nn.Conv1d(time_channels, 1, kernel_size=1)
         self.deceleration_head = nn.Conv1d(time_channels, 1, kernel_size=1)
@@ -176,18 +215,73 @@ class UNet1DPhysiologicalMultitask(nn.Module):
     def _forward_features(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         if self.backbone_type == "unet":
             return self._forward_unet_features(x)
-        shared = self.shared_backbone(x)
+        if self.backbone_type == "modern_tcn":
+            shared = self.shared_backbone(x)
+            return shared["time_features"], shared["global_features"]
+        shared = self.multiscale_tcn_unet_backbone(x)
         return shared["time_features"], shared["global_features"]
 
-    def _routing_weights(self, x: torch.Tensor) -> torch.Tensor | None:
+    def _expert_routing_weights(self, x: torch.Tensor) -> torch.Tensor | None:
         if self.model_variant != "expert_residual":
             return None
         if x.shape[1] < 1 + self.num_experts:
             return None
         return x[:, 1 : 1 + self.num_experts, :]
 
+    def _typed_routing_weights(self, x: torch.Tensor) -> torch.Tensor | None:
+        if self.model_variant != "typed_scale_residual":
+            return None
+        if x.shape[1] < 1 + self.num_experts:
+            return None
+        halving_mask = x[:, 1:2, :]
+        doubling_mask = x[:, 2:3, :]
+        other_mask = x[:, 3:6, :].amax(dim=1, keepdim=True)
+        weights = torch.cat([halving_mask, doubling_mask, other_mask], dim=1)
+        weight_sum = weights.sum(dim=1, keepdim=True)
+        normalized = torch.where(weight_sum > 0, weights / weight_sum.clamp(min=1e-8), torch.zeros_like(weights))
+        return normalized
+
+    def _typed_branch_residuals(self, noisy_signal: torch.Tensor, time_features: torch.Tensor) -> Dict[str, torch.Tensor]:
+        if (
+            self.halving_scale_head is None
+            or self.halving_bias_head is None
+            or self.doubling_scale_head is None
+            or self.doubling_bias_head is None
+            or self.other_shared_head is None
+        ):
+            raise RuntimeError("typed_scale_residual heads are not initialized")
+
+        halving_delta_scale = self.halving_scale_head(time_features)
+        halving_delta_bias = self.halving_bias_head(time_features)
+        doubling_delta_scale = self.doubling_scale_head(time_features)
+        doubling_delta_bias = self.doubling_bias_head(time_features)
+        halving_residual = noisy_signal * halving_delta_scale + halving_delta_bias
+        doubling_residual = noisy_signal * doubling_delta_scale + doubling_delta_bias
+        other_residual = self.other_shared_head(time_features)
+        branch_residuals = torch.cat([halving_residual, doubling_residual, other_residual], dim=1)
+        return {
+            "halving_residual": halving_residual,
+            "doubling_residual": doubling_residual,
+            "other_residual": other_residual,
+            "typed_branch_residuals": branch_residuals,
+        }
+
     def _fused_residual(self, x: torch.Tensor, time_features: torch.Tensor) -> Dict[str, torch.Tensor]:
-        routing_weights = self._routing_weights(x)
+        if self.model_variant == "typed_scale_residual":
+            routing_weights = self._typed_routing_weights(x)
+            if routing_weights is None:
+                raise ValueError("typed_scale_residual requires noisy + 5-class mask input [B, 6, L]")
+            typed_branches = self._typed_branch_residuals(x[:, :1, :], time_features)
+            raw_residual = torch.sum(typed_branches["typed_branch_residuals"] * routing_weights, dim=1, keepdim=True)
+            return {
+                "raw_residual": raw_residual,
+                "halving_residual": typed_branches["halving_residual"],
+                "doubling_residual": typed_branches["doubling_residual"],
+                "other_residual": typed_branches["other_residual"],
+                "typed_routing_weights": routing_weights,
+            }
+
+        routing_weights = self._expert_routing_weights(x)
         if routing_weights is None or self.expert_reconstruction_heads is None:
             raw_residual = self.reconstruction_head(time_features)
             return {
@@ -205,6 +299,8 @@ class UNet1DPhysiologicalMultitask(nn.Module):
     def gradnorm_reference_parameter(self) -> torch.nn.Parameter:
         if self.backbone_type == "modern_tcn":
             return self.shared_backbone.stem[0].weight
+        if self.backbone_type == "multiscale_tcn_unet":
+            return self.multiscale_tcn_unet_backbone.stem.branches[0][0].weight
         return self.enc[0].conv[0].weight
 
     def forward(self, x: torch.Tensor, edit_gate: torch.Tensor | None = None) -> Dict[str, torch.Tensor]:
@@ -232,29 +328,53 @@ class UNet1DPhysiologicalMultitask(nn.Module):
 
 
 def _test() -> None:
+    common_backbones = ("unet", "modern_tcn", "multiscale_tcn_unet")
+    for backbone_type in common_backbones:
+        for in_channels in (1, 6):
+            model = UNet1DPhysiologicalMultitask(
+                in_channels=in_channels,
+                base_channels=16,
+                depth=4 if backbone_type == "multiscale_tcn_unet" else 3,
+                model_variant="legacy_single_residual",
+                backbone_type=backbone_type,
+            )
+            x = torch.randn(2, in_channels, 240)
+            gate = torch.rand(2, 1, 240)
+            y = model(x, edit_gate=gate)
+            assert y["reconstruction"].shape == (2, 1, 240)
+            assert y["raw_residual"].shape == (2, 1, 240)
+            assert y["gated_residual"].shape == (2, 1, 240)
+            assert y["acc_logits"].shape == (2, 1, 240)
+            assert y["dec_logits"].shape == (2, 1, 240)
+            for key in ("baseline", "stv", "ltv", "baseline_variability"):
+                assert y[key].shape == (2,), f"{key}: {y[key].shape}"
+
     for backbone_type in ("unet", "modern_tcn"):
-        for model_variant in ("legacy_single_residual", "expert_residual"):
-            for in_channels in (1, 6):
-                model = UNet1DPhysiologicalMultitask(
-                    in_channels=in_channels,
-                    base_channels=16,
-                    depth=3,
-                    model_variant=model_variant,
-                    backbone_type=backbone_type,
-                )
-                x = torch.randn(2, in_channels, 240)
-                gate = torch.rand(2, 1, 240)
-                y = model(x, edit_gate=gate)
-                assert y["reconstruction"].shape == (2, 1, 240)
-                assert y["raw_residual"].shape == (2, 1, 240)
-                assert y["gated_residual"].shape == (2, 1, 240)
-                assert y["acc_logits"].shape == (2, 1, 240)
-                assert y["dec_logits"].shape == (2, 1, 240)
-                for key in ("baseline", "stv", "ltv", "baseline_variability"):
-                    assert y[key].shape == (2,), f"{key}: {y[key].shape}"
-                if model_variant == "expert_residual" and in_channels == 6:
-                    assert y["expert_residuals"].shape == (2, 5, 240)
-                    assert y["routing_weights"].shape == (2, 5, 240)
+        model = UNet1DPhysiologicalMultitask(
+            in_channels=6,
+            base_channels=16,
+            depth=3,
+            model_variant="expert_residual",
+            backbone_type=backbone_type,
+        )
+        y = model(torch.randn(2, 6, 240), edit_gate=torch.rand(2, 1, 240))
+        assert y["expert_residuals"].shape == (2, 5, 240)
+        assert y["routing_weights"].shape == (2, 5, 240)
+
+    for bottleneck_type in ("none", "mhsa"):
+        model = UNet1DPhysiologicalMultitask(
+            in_channels=6,
+            base_channels=16,
+            depth=4,
+            model_variant="typed_scale_residual",
+            backbone_type="multiscale_tcn_unet",
+            bottleneck_type=bottleneck_type,
+        )
+        y = model(torch.randn(2, 6, 240), edit_gate=torch.rand(2, 1, 240))
+        assert y["halving_residual"].shape == (2, 1, 240)
+        assert y["doubling_residual"].shape == (2, 1, 240)
+        assert y["other_residual"].shape == (2, 1, 240)
+        assert y["typed_routing_weights"].shape == (2, 3, 240)
     print("UNet1DPhysiologicalMultitask test OK")
 
 

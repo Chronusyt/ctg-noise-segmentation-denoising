@@ -24,7 +24,7 @@ for _path in (_REPO_ROOT, _SRC_ROOT):
         sys.path.insert(0, str(_path))
 
 from ctg_pipeline.data.multitask_dataset import ClinicalMultitaskDataset
-from ctg_pipeline.models.unet1d_physiological_multitask import UNet1DPhysiologicalMultitask
+from ctg_pipeline.models.unet1d_physiological_multitask import ARTIFACT_CLASS_ORDER, UNet1DPhysiologicalMultitask
 from ctg_pipeline.utils.gradnorm import GradNormBalancer
 from ctg_pipeline.utils.editing import build_edit_gate_torch, compute_region_masks_torch
 from ctg_pipeline.utils.pathing import ARTIFACTS_ROOT, DENOISING_DATASETS_ROOT, resolve_repo_path
@@ -98,6 +98,19 @@ def build_task_loss_weights(args: argparse.Namespace) -> OrderedDict[str, float]
             ("baseline_variability", float(args.bv_weight)),
         ]
     )
+
+
+def validate_args(args: argparse.Namespace) -> None:
+    if args.backbone_type != "multiscale_tcn_unet" and args.bottleneck_type != "none":
+        raise ValueError("bottleneck_type=mhsa 仅支持 backbone_type=multiscale_tcn_unet")
+
+    if args.model_variant == "typed_scale_residual":
+        if args.input_mode != "pred_mask":
+            raise ValueError("typed_scale_residual 第一版只支持 input_mode=pred_mask")
+        if args.backbone_type != "multiscale_tcn_unet":
+            raise ValueError("typed_scale_residual 第一版只支持 backbone_type=multiscale_tcn_unet")
+        if args.loss_balance_mode != "static":
+            raise ValueError("typed_scale_residual 第一版不支持 GradNorm，请使用 --loss_balance_mode static")
 
 
 def compute_static_total(losses: Dict[str, torch.Tensor], args: argparse.Namespace) -> torch.Tensor:
@@ -194,6 +207,7 @@ def reconstruction_terms(
     recon_global = recon_pointwise.mean()
     recon_corrupt = masked_mean(recon_pointwise, region_masks["corrupted"])
     recon_clean = masked_mean(recon_pointwise, region_masks["clean"])
+    boundary_identity = masked_mean(identity_pointwise, region_masks["boundary_near_clean"])
 
     if args.identity_region == "all_clean":
         identity_mask = region_masks["clean"]
@@ -213,6 +227,7 @@ def reconstruction_terms(
             + args.lambda_corrupt * recon_corrupt
             + args.lambda_clean * recon_clean
             + args.lambda_identity * identity_clean
+            + args.lambda_boundary_identity * boundary_identity
         )
     else:
         raise ValueError(f"Unknown reconstruction_mode: {args.reconstruction_mode}")
@@ -223,6 +238,7 @@ def reconstruction_terms(
         "recon_corrupt": recon_corrupt,
         "recon_clean": recon_clean,
         "identity_clean": identity_clean,
+        "boundary_identity": boundary_identity,
     }
 
 
@@ -359,6 +375,7 @@ def run_epoch(
         "recon_corrupt": 0.0,
         "recon_clean": 0.0,
         "identity_clean": 0.0,
+        "boundary_identity": 0.0,
         "acc": 0.0,
         "dec": 0.0,
         "baseline": 0.0,
@@ -423,6 +440,7 @@ def write_train_log_header(path: str) -> None:
                 "train_recon_corrupt",
                 "train_recon_clean",
                 "train_identity_clean",
+                "train_boundary_identity",
                 "train_acc",
                 "train_dec",
                 "train_baseline",
@@ -435,6 +453,7 @@ def write_train_log_header(path: str) -> None:
                 "val_recon_corrupt",
                 "val_recon_clean",
                 "val_identity_clean",
+                "val_boundary_identity",
                 "val_acc",
                 "val_dec",
                 "val_baseline",
@@ -458,6 +477,7 @@ def append_train_log(path: str, epoch: int, lr: float, train: dict, val: dict) -
                 train["recon_corrupt"],
                 train["recon_clean"],
                 train["identity_clean"],
+                train["boundary_identity"],
                 train["acc"],
                 train["dec"],
                 train["baseline"],
@@ -470,6 +490,7 @@ def append_train_log(path: str, epoch: int, lr: float, train: dict, val: dict) -
                 val["recon_corrupt"],
                 val["recon_clean"],
                 val["identity_clean"],
+                val["boundary_identity"],
                 val["acc"],
                 val["dec"],
                 val["baseline"],
@@ -481,6 +502,12 @@ def append_train_log(path: str, epoch: int, lr: float, train: dict, val: dict) -
 
 
 def infer_experiment_variant(args: argparse.Namespace) -> str:
+    if args.input_mode == "pred_mask" and args.model_variant == "typed_scale_residual":
+        if args.bottleneck_type == "mhsa":
+            return "physiological_multitask_v4_typed_scale_pred_mask_constrained_mhsa"
+        return "physiological_multitask_v4_typed_scale_pred_mask_constrained_editing"
+    if args.input_mode == "pred_mask" and args.backbone_type == "multiscale_tcn_unet":
+        return "physiological_multitask_v4_multiscale_tcn_pred_mask_constrained_editing"
     if args.input_mode == "no_mask":
         return "physiological_multitask_v1_no_mask"
     if args.input_mode == "gt_mask" and args.gate_mode == "none":
@@ -507,14 +534,15 @@ def main() -> None:
     parser.add_argument("--input_mode", choices=["no_mask", "gt_mask", "pred_mask"], default="no_mask")
     parser.add_argument(
         "--model_variant",
-        choices=["legacy_single_residual", "expert_residual"],
+        choices=["legacy_single_residual", "expert_residual", "typed_scale_residual"],
         default="legacy_single_residual",
     )
     parser.add_argument(
         "--backbone_type",
-        choices=["unet", "modern_tcn"],
+        choices=["unet", "modern_tcn", "multiscale_tcn_unet"],
         default="unet",
     )
+    parser.add_argument("--bottleneck_type", choices=["none", "mhsa"], default="none")
     parser.add_argument(
         "--loss_balance_mode",
         choices=["static", "gradnorm"],
@@ -559,6 +587,7 @@ def main() -> None:
     parser.add_argument("--lambda_corrupt", type=float, default=3.0)
     parser.add_argument("--lambda_clean", type=float, default=1.0)
     parser.add_argument("--lambda_identity", type=float, default=0.5)
+    parser.add_argument("--lambda_boundary_identity", type=float, default=0.0)
     parser.add_argument("--scalar_loss", choices=["mse", "smooth_l1"], default="smooth_l1")
     parser.add_argument("--acc_event_loss", choices=["bce", "focal"], default="bce")
     parser.add_argument("--dec_event_loss", choices=["bce", "focal"], default="bce")
@@ -587,6 +616,7 @@ def main() -> None:
     args.output_dir = str(resolve_repo_path(args.output_dir))
     args.pred_mask_cache_dir = str(resolve_repo_path(args.pred_mask_cache_dir)) if args.pred_mask_cache_dir else ""
     os.makedirs(args.output_dir, exist_ok=True)
+    validate_args(args)
 
     set_seed(args.seed)
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -596,6 +626,7 @@ def main() -> None:
     print(f"输入模式: {args.input_mode}", flush=True)
     print(f"模型变体: {args.model_variant}", flush=True)
     print(f"backbone: {args.backbone_type}", flush=True)
+    print(f"bottleneck: {args.bottleneck_type}", flush=True)
     print(f"loss balance: {args.loss_balance_mode}", flush=True)
     print(f"pred mask cache: {args.pred_mask_cache_dir or 'embedded_or_none'}", flush=True)
     print(f"pred mask variant: {args.pred_mask_variant}", flush=True)
@@ -603,6 +634,7 @@ def main() -> None:
     print(f"重建模式: {args.reconstruction_mode}", flush=True)
     print(f"identity region: {args.identity_region}", flush=True)
     print(f"boundary_k: {args.boundary_k}", flush=True)
+    print(f"lambda_boundary_identity: {args.lambda_boundary_identity}", flush=True)
     print(f"loss mask source: {args.loss_mask_source}", flush=True)
     print(f"事件损失: acc={args.acc_event_loss}, dec={args.dec_event_loss}", flush=True)
     print(f"数据目录: {args.data_dir}", flush=True)
@@ -660,6 +692,7 @@ def main() -> None:
         residual_reconstruction=not args.no_residual_reconstruction,
         model_variant=args.model_variant,
         backbone_type=args.backbone_type,
+        bottleneck_type=args.bottleneck_type,
         modern_tcn_blocks_per_stage=args.modern_tcn_blocks_per_stage,
         modern_tcn_kernel_size=args.modern_tcn_kernel_size,
         modern_tcn_expansion=args.modern_tcn_expansion,
@@ -707,12 +740,14 @@ def main() -> None:
             "model_class": "UNet1DPhysiologicalMultitask",
             "model_variant": args.model_variant,
             "backbone_type": args.backbone_type,
+            "bottleneck_type": args.bottleneck_type,
             "loss_balance_mode": args.loss_balance_mode,
             "experiment_variant": experiment_variant,
             "in_channels": in_channels,
             "residual_reconstruction": not args.no_residual_reconstruction,
             "task_loss_keys": list(TASK_LOSS_KEYS),
             "task_loss_weights": dict(build_task_loss_weights(args)),
+            "artifact_class_order": list(ARTIFACT_CLASS_ORDER),
         }
     )
     with open(os.path.join(args.output_dir, "config.json"), "w", encoding="utf-8") as f:
@@ -770,6 +805,7 @@ def main() -> None:
             f"train_recon_corrupt={train_metrics['recon_corrupt']:.4f}, "
             f"train_recon_clean={train_metrics['recon_clean']:.4f}, "
             f"train_identity_clean={train_metrics['identity_clean']:.4f}, "
+            f"train_boundary_identity={train_metrics['boundary_identity']:.4f}, "
             f"train_acc={train_metrics['acc']:.4f}, train_dec={train_metrics['dec']:.4f}, "
             f"val_total={val_metrics['total']:.4f}, "
             f"val_recon_total={val_metrics['reconstruction']:.4f}, "
@@ -777,6 +813,7 @@ def main() -> None:
             f"val_recon_corrupt={val_metrics['recon_corrupt']:.4f}, "
             f"val_recon_clean={val_metrics['recon_clean']:.4f}, "
             f"val_identity_clean={val_metrics['identity_clean']:.4f}, "
+            f"val_boundary_identity={val_metrics['boundary_identity']:.4f}, "
             f"val_acc={val_metrics['acc']:.4f}, val_dec={val_metrics['dec']:.4f}, "
             f"val_baseline={val_metrics['baseline']:.4f}, val_stv={val_metrics['stv']:.4f}, "
             f"val_ltv={val_metrics['ltv']:.4f}, val_bv={val_metrics['baseline_variability']:.4f}"
@@ -840,6 +877,8 @@ def main() -> None:
         val_recon_clean=np.asarray([h["val"]["recon_clean"] for h in history], dtype=np.float32),
         train_identity_clean=np.asarray([h["train"]["identity_clean"] for h in history], dtype=np.float32),
         val_identity_clean=np.asarray([h["val"]["identity_clean"] for h in history], dtype=np.float32),
+        train_boundary_identity=np.asarray([h["train"]["boundary_identity"] for h in history], dtype=np.float32),
+        val_boundary_identity=np.asarray([h["val"]["boundary_identity"] for h in history], dtype=np.float32),
     )
     print(f"训练完成，输出目录: {args.output_dir}", flush=True)
 

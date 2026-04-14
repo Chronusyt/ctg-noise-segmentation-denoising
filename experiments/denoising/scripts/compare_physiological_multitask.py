@@ -46,6 +46,7 @@ METADATA_FIELDS = [
     "experiment_variant",
     "model_variant",
     "backbone_type",
+    "bottleneck_type",
     "loss_balance_mode",
 ]
 
@@ -84,6 +85,7 @@ def baseline_row(name: str, path: str, direct: bool = False) -> dict:
         "experiment_variant": None,
         "model_variant": None,
         "backbone_type": None,
+        "bottleneck_type": None,
         "loss_balance_mode": None,
         "overall_mse": overall.get("overall_mse"),
         "corrupted_region_mse": overall.get("corrupted_region_mse"),
@@ -112,23 +114,28 @@ def infer_multitask_label(data: dict) -> str:
     metadata = data.get("metadata", {})
     architecture_variant = metadata.get("model_variant", "")
     backbone_type = metadata.get("backbone_type", "unet")
+    bottleneck_type = metadata.get("bottleneck_type", "none")
     loss_balance_mode = metadata.get("loss_balance_mode", "static")
     experiment_variant = metadata.get("experiment_variant", "")
     model_variant = metadata.get("model_variant", "")
     input_mode = metadata.get("input_mode", "")
     gate_mode = metadata.get("gate_mode", "none")
-    if architecture_variant in {"legacy_single_residual", "expert_residual"}:
+    if architecture_variant in {"legacy_single_residual", "expert_residual", "typed_scale_residual"}:
         experiment_map = {
             "physiological_multitask_v1_no_mask": "Physiological multitask v1 no-mask",
             "physiological_multitask_v2_gt_mask_aux": "Physiological multitask v2 gt-mask auxiliary",
             "physiological_multitask_v2_2_gt_mask_constrained_editing": "Physiological multitask v2.2 gt-mask constrained",
             "physiological_multitask_v3_pred_mask_constrained_editing": "Physiological multitask v3 pred-mask constrained",
+            "physiological_multitask_v4_multiscale_tcn_pred_mask_constrained_editing": "Physiological multitask v4 pred-mask multiscale backbone",
+            "physiological_multitask_v4_typed_scale_pred_mask_constrained_editing": "Physiological multitask v4 pred-mask typed scale",
+            "physiological_multitask_v4_typed_scale_pred_mask_constrained_mhsa": "Physiological multitask v4 pred-mask typed scale + mhsa",
         }
         base = (
             experiment_map.get(experiment_variant, experiment_variant)
             or ("pred-mask" if input_mode == "pred_mask" else "gt-mask" if input_mode == "gt_mask" else "no-mask")
         )
-        return f"{base} | {architecture_variant} | {backbone_type} | {loss_balance_mode}"
+        bottleneck_suffix = f" | {bottleneck_type}" if bottleneck_type and bottleneck_type != "none" else ""
+        return f"{base} | {architecture_variant} | {backbone_type}{bottleneck_suffix} | {loss_balance_mode}"
     if model_variant == "physiological_multitask_v3_pred_mask_constrained_editing":
         return "Physiological multitask v3 (pred-mask constrained editing)"
     if model_variant == "physiological_multitask_v2_2_gt_mask_constrained_editing":
@@ -155,6 +162,7 @@ def multitask_row(path: str, label: str | None = None) -> dict:
         "experiment_variant": data.get("metadata", {}).get("experiment_variant"),
         "model_variant": data.get("metadata", {}).get("model_variant"),
         "backbone_type": data.get("metadata", {}).get("backbone_type"),
+        "bottleneck_type": data.get("metadata", {}).get("bottleneck_type"),
         "loss_balance_mode": data.get("metadata", {}).get("loss_balance_mode"),
         "overall_mse": recon.get("overall_mse"),
         "corrupted_region_mse": recon.get("corrupted_region_mse"),
