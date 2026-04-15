@@ -87,7 +87,15 @@ def infer_model_variant(ckpt: dict) -> str:
 
 def infer_backbone_type(ckpt: dict) -> str:
     backbone_type = ckpt.get("config", {}).get("backbone_type", "unet")
-    if backbone_type in {"unet", "modern_tcn", "multiscale_tcn_unet"}:
+    if backbone_type in {
+        "unet",
+        "modern_tcn",
+        "multiscale_unet",
+        "tcn_unet",
+        "multiscale_tcn_unet",
+        "modern_tcn_unet",
+        "multiscale_modern_tcn_unet",
+    }:
         return backbone_type
     return "unet"
 

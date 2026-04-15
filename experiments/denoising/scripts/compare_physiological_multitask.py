@@ -41,6 +41,22 @@ METRICS = [
     "acc_f1",
     "dec_f1",
 ]
+ARTIFACT_METRICS = [
+    "halving_region_mse",
+    "doubling_region_mse",
+    "mhr_region_mse",
+    "missing_region_mse",
+    "spike_region_mse",
+    "scale_artifact_mse",
+    "other_artifact_mse",
+    "halving_region_mae",
+    "doubling_region_mae",
+    "mhr_region_mae",
+    "missing_region_mae",
+    "spike_region_mae",
+    "scale_artifact_mae",
+    "other_artifact_mae",
+]
 METADATA_FIELDS = [
     "input_mode",
     "experiment_variant",
@@ -107,6 +123,7 @@ def baseline_row(name: str, path: str, direct: bool = False) -> dict:
         "head_bv_mae": None,
         "acc_f1": None,
         "dec_f1": None,
+        **{key: None for key in ARTIFACT_METRICS},
     }
 
 
@@ -126,7 +143,13 @@ def infer_multitask_label(data: dict) -> str:
             "physiological_multitask_v2_gt_mask_aux": "Physiological multitask v2 gt-mask auxiliary",
             "physiological_multitask_v2_2_gt_mask_constrained_editing": "Physiological multitask v2.2 gt-mask constrained",
             "physiological_multitask_v3_pred_mask_constrained_editing": "Physiological multitask v3 pred-mask constrained",
-            "physiological_multitask_v4_multiscale_tcn_pred_mask_constrained_editing": "Physiological multitask v4 pred-mask multiscale backbone",
+            "physiological_multitask_v4_unet_pred_mask_constrained_editing": "Physiological multitask v4 pred-mask U-Net backbone",
+            "physiological_multitask_v4_legacy_modern_tcn_pred_mask_constrained_editing": "Physiological multitask v4 pred-mask legacy ModernTCN backbone",
+            "physiological_multitask_v4_multiscale_unet_pred_mask_constrained_editing": "Physiological multitask v4 pred-mask multiscale U-Net backbone",
+            "physiological_multitask_v4_tcn_unet_pred_mask_constrained_editing": "Physiological multitask v4 pred-mask TCN-U-Net backbone",
+            "physiological_multitask_v4_multiscale_tcn_pred_mask_constrained_editing": "Physiological multitask v4 pred-mask multiscale TCN-U-Net backbone",
+            "physiological_multitask_v4_modern_tcn_unet_pred_mask_constrained_editing": "Physiological multitask v4 pred-mask ModernTCN-U-Net backbone",
+            "physiological_multitask_v4_multiscale_modern_tcn_unet_pred_mask_constrained_editing": "Physiological multitask v4 pred-mask multiscale ModernTCN-U-Net backbone",
             "physiological_multitask_v4_typed_scale_pred_mask_constrained_editing": "Physiological multitask v4 pred-mask typed scale",
             "physiological_multitask_v4_typed_scale_pred_mask_constrained_mhsa": "Physiological multitask v4 pred-mask typed scale + mhsa",
         }
@@ -150,6 +173,7 @@ def infer_multitask_label(data: dict) -> str:
 def multitask_row(path: str, label: str | None = None) -> dict:
     data = load_json(path)
     recon = data.get("reconstruction", {})
+    artifact = data.get("artifact_reconstruction", {})
     scalar = data.get("scalar_head", {})
     derived = data.get("reconstructed_signal_derived_features", {})
     events = data.get("event_prediction", {})
@@ -184,6 +208,20 @@ def multitask_row(path: str, label: str | None = None) -> dict:
         "head_bv_mae": scalar.get("bv_mae"),
         "acc_f1": acc.get("f1"),
         "dec_f1": dec.get("f1"),
+        "halving_region_mse": artifact.get("halving_region_mse"),
+        "doubling_region_mse": artifact.get("doubling_region_mse"),
+        "mhr_region_mse": artifact.get("mhr_region_mse"),
+        "missing_region_mse": artifact.get("missing_region_mse"),
+        "spike_region_mse": artifact.get("spike_region_mse"),
+        "scale_artifact_mse": artifact.get("scale_artifact_mse"),
+        "other_artifact_mse": artifact.get("other_artifact_mse"),
+        "halving_region_mae": artifact.get("halving_region_mae"),
+        "doubling_region_mae": artifact.get("doubling_region_mae"),
+        "mhr_region_mae": artifact.get("mhr_region_mae"),
+        "missing_region_mae": artifact.get("missing_region_mae"),
+        "spike_region_mae": artifact.get("spike_region_mae"),
+        "scale_artifact_mae": artifact.get("scale_artifact_mae"),
+        "other_artifact_mae": artifact.get("other_artifact_mae"),
     }
 
 
@@ -199,6 +237,10 @@ def maybe_add_multitask(rows: list[dict], path: str, label: str | None = None) -
 
 def write_markdown(path: str, rows: list[dict]) -> None:
     headers = ["method", *METADATA_FIELDS, *METRICS]
+    write_markdown_for_fields(path, rows, headers)
+
+
+def write_markdown_for_fields(path: str, rows: list[dict], headers: list[str]) -> None:
     lines = [
         "| " + " | ".join(headers) + " |",
         "| " + " | ".join(["---"] * len(headers)) + " |",
@@ -207,7 +249,7 @@ def write_markdown(path: str, rows: list[dict]) -> None:
         lines.append(
             "| "
             + " | ".join(
-                [row["method"], *[fmt(row.get(key)) for key in METADATA_FIELDS], *[fmt(row.get(key)) for key in METRICS]]
+                [fmt(row.get(key)) for key in headers]
             )
             + " |"
         )
@@ -277,7 +319,7 @@ def main() -> None:
 
     csv_path = os.path.join(output_dir, "physiological_multitask_comparison.csv")
     with open(csv_path, "w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=["method", "source", *METADATA_FIELDS, *METRICS])
+        writer = csv.DictWriter(f, fieldnames=["method", "source", *METADATA_FIELDS, *METRICS], extrasaction="ignore")
         writer.writeheader()
         writer.writerows(rows)
 
@@ -288,8 +330,26 @@ def main() -> None:
     md_path = os.path.join(output_dir, "physiological_multitask_comparison.md")
     write_markdown(md_path, rows)
 
+    artifact_csv_path = os.path.join(output_dir, "physiological_multitask_artifact_comparison.csv")
+    with open(artifact_csv_path, "w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(
+            f,
+            fieldnames=["method", "source", *METADATA_FIELDS, *ARTIFACT_METRICS],
+            extrasaction="ignore",
+        )
+        writer.writeheader()
+        writer.writerows(rows)
+
+    artifact_json_path = os.path.join(output_dir, "physiological_multitask_artifact_comparison.json")
+    with open(artifact_json_path, "w", encoding="utf-8") as f:
+        json.dump(rows, f, indent=2, ensure_ascii=False)
+
+    artifact_md_path = os.path.join(output_dir, "physiological_multitask_artifact_comparison.md")
+    write_markdown_for_fields(artifact_md_path, rows, ["method", *METADATA_FIELDS, *ARTIFACT_METRICS])
+
     print(f"Comparison saved to {csv_path}")
     print(f"Markdown saved to {md_path}")
+    print(f"Artifact comparison saved to {artifact_csv_path}")
     for row in rows:
         print(row["method"], {key: fmt(row.get(key)) for key in METRICS})
 

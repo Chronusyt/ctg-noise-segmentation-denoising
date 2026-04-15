@@ -30,11 +30,23 @@ import torch.nn as nn
 
 try:
     from .modern_tcn_backbone import ModernTCNBackbone1D
-    from .multiscale_tcn_unet_backbone import MultiscaleTCNUNetBackbone1D
+    from .multiscale_tcn_unet_backbone import (
+        ModernTCNUNetBackbone1D,
+        MultiscaleModernTCNUNetBackbone1D,
+        MultiscaleTCNUNetBackbone1D,
+        MultiscaleUNetBackbone1D,
+        TCNUNetBackbone1D,
+    )
     from .unet1d_denoiser import DoubleConv1D
 except ImportError:  # Allow standalone smoke tests.
     from modern_tcn_backbone import ModernTCNBackbone1D
-    from multiscale_tcn_unet_backbone import MultiscaleTCNUNetBackbone1D
+    from multiscale_tcn_unet_backbone import (
+        ModernTCNUNetBackbone1D,
+        MultiscaleModernTCNUNetBackbone1D,
+        MultiscaleTCNUNetBackbone1D,
+        MultiscaleUNetBackbone1D,
+        TCNUNetBackbone1D,
+    )
     from unet1d_denoiser import DoubleConv1D
 
 
@@ -42,7 +54,15 @@ ARTIFACT_CLASS_ORDER = ("halving", "doubling", "mhr", "missing", "spike")
 NUM_EXPERTS = len(ARTIFACT_CLASS_ORDER)
 NUM_TYPED_BRANCHES = 3
 MODEL_VARIANTS = {"legacy_single_residual", "expert_residual", "typed_scale_residual"}
-BACKBONE_TYPES = {"unet", "modern_tcn", "multiscale_tcn_unet"}
+BACKBONE_TYPES = {
+    "unet",
+    "modern_tcn",
+    "multiscale_unet",
+    "tcn_unet",
+    "multiscale_tcn_unet",
+    "modern_tcn_unet",
+    "multiscale_modern_tcn_unet",
+}
 BOTTLENECK_TYPES = {"none", "mhsa"}
 
 
@@ -110,6 +130,8 @@ class UNet1DPhysiologicalMultitask(nn.Module):
         self.backbone_type = backbone_type
         self.bottleneck_type = bottleneck_type
         self.num_experts = NUM_EXPERTS
+        self.shared_backbone = None
+        self.multiscale_tcn_unet_backbone = None
 
         if self.backbone_type == "unet":
             self.enc = nn.ModuleList()
@@ -133,8 +155,6 @@ class UNet1DPhysiologicalMultitask(nn.Module):
 
             time_channels = ch
             global_channels = bottleneck_ch
-            self.shared_backbone = None
-            self.multiscale_tcn_unet_backbone = None
         elif self.backbone_type == "modern_tcn":
             self.shared_backbone = ModernTCNBackbone1D(
                 in_channels=in_channels,
@@ -145,11 +165,28 @@ class UNet1DPhysiologicalMultitask(nn.Module):
                 expansion=modern_tcn_expansion,
                 dropout=dropout,
             )
-            self.multiscale_tcn_unet_backbone = None
             time_channels = self.shared_backbone.out_channels
             global_channels = self.shared_backbone.out_channels
-        else:
-            self.shared_backbone = None
+        elif self.backbone_type == "multiscale_unet":
+            self.shared_backbone = MultiscaleUNetBackbone1D(
+                in_channels=in_channels,
+                base_channels=base_channels,
+                depth=depth,
+                dropout=dropout,
+            )
+            time_channels = self.shared_backbone.time_channels
+            global_channels = self.shared_backbone.global_channels
+        elif self.backbone_type == "tcn_unet":
+            self.shared_backbone = TCNUNetBackbone1D(
+                in_channels=in_channels,
+                base_channels=base_channels,
+                depth=depth,
+                dropout=dropout,
+                bottleneck_type=bottleneck_type,
+            )
+            time_channels = self.shared_backbone.time_channels
+            global_channels = self.shared_backbone.global_channels
+        elif self.backbone_type == "multiscale_tcn_unet":
             self.multiscale_tcn_unet_backbone = MultiscaleTCNUNetBackbone1D(
                 in_channels=in_channels,
                 base_channels=base_channels,
@@ -159,6 +196,32 @@ class UNet1DPhysiologicalMultitask(nn.Module):
             )
             time_channels = self.multiscale_tcn_unet_backbone.time_channels
             global_channels = self.multiscale_tcn_unet_backbone.global_channels
+        elif self.backbone_type == "modern_tcn_unet":
+            self.shared_backbone = ModernTCNUNetBackbone1D(
+                in_channels=in_channels,
+                base_channels=base_channels,
+                depth=depth,
+                dropout=dropout,
+                bottleneck_type=bottleneck_type,
+                blocks_per_stage=modern_tcn_blocks_per_stage,
+                kernel_size=modern_tcn_kernel_size,
+                expansion=modern_tcn_expansion,
+            )
+            time_channels = self.shared_backbone.time_channels
+            global_channels = self.shared_backbone.global_channels
+        else:
+            self.shared_backbone = MultiscaleModernTCNUNetBackbone1D(
+                in_channels=in_channels,
+                base_channels=base_channels,
+                depth=depth,
+                dropout=dropout,
+                bottleneck_type=bottleneck_type,
+                blocks_per_stage=modern_tcn_blocks_per_stage,
+                kernel_size=modern_tcn_kernel_size,
+                expansion=modern_tcn_expansion,
+            )
+            time_channels = self.shared_backbone.time_channels
+            global_channels = self.shared_backbone.global_channels
 
         # Keep the historical single residual head for compatibility and for the
         # multiscale-backbone shared-residual ablation.
@@ -215,10 +278,10 @@ class UNet1DPhysiologicalMultitask(nn.Module):
     def _forward_features(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         if self.backbone_type == "unet":
             return self._forward_unet_features(x)
-        if self.backbone_type == "modern_tcn":
-            shared = self.shared_backbone(x)
+        if self.backbone_type == "multiscale_tcn_unet":
+            shared = self.multiscale_tcn_unet_backbone(x)
             return shared["time_features"], shared["global_features"]
-        shared = self.multiscale_tcn_unet_backbone(x)
+        shared = self.shared_backbone(x)
         return shared["time_features"], shared["global_features"]
 
     def _expert_routing_weights(self, x: torch.Tensor) -> torch.Tensor | None:
@@ -297,11 +360,13 @@ class UNet1DPhysiologicalMultitask(nn.Module):
         }
 
     def gradnorm_reference_parameter(self) -> torch.nn.Parameter:
-        if self.backbone_type == "modern_tcn":
-            return self.shared_backbone.stem[0].weight
+        if self.backbone_type == "unet":
+            return self.enc[0].conv[0].weight
         if self.backbone_type == "multiscale_tcn_unet":
-            return self.multiscale_tcn_unet_backbone.stem.branches[0][0].weight
-        return self.enc[0].conv[0].weight
+            return self.multiscale_tcn_unet_backbone.reference_parameter()
+        if hasattr(self.shared_backbone, "reference_parameter"):
+            return self.shared_backbone.reference_parameter()
+        return self.shared_backbone.stem[0].weight
 
     def forward(self, x: torch.Tensor, edit_gate: torch.Tensor | None = None) -> Dict[str, torch.Tensor]:
         time_features, global_features = self._forward_features(x)
@@ -328,13 +393,21 @@ class UNet1DPhysiologicalMultitask(nn.Module):
 
 
 def _test() -> None:
-    common_backbones = ("unet", "modern_tcn", "multiscale_tcn_unet")
+    common_backbones = (
+        "unet",
+        "modern_tcn",
+        "multiscale_unet",
+        "tcn_unet",
+        "multiscale_tcn_unet",
+        "modern_tcn_unet",
+        "multiscale_modern_tcn_unet",
+    )
     for backbone_type in common_backbones:
         for in_channels in (1, 6):
             model = UNet1DPhysiologicalMultitask(
                 in_channels=in_channels,
                 base_channels=16,
-                depth=4 if backbone_type == "multiscale_tcn_unet" else 3,
+                depth=4,
                 model_variant="legacy_single_residual",
                 backbone_type=backbone_type,
             )
@@ -349,11 +422,11 @@ def _test() -> None:
             for key in ("baseline", "stv", "ltv", "baseline_variability"):
                 assert y[key].shape == (2,), f"{key}: {y[key].shape}"
 
-    for backbone_type in ("unet", "modern_tcn"):
+    for backbone_type in ("unet", "modern_tcn", "tcn_unet", "modern_tcn_unet"):
         model = UNet1DPhysiologicalMultitask(
             in_channels=6,
             base_channels=16,
-            depth=3,
+            depth=4,
             model_variant="expert_residual",
             backbone_type=backbone_type,
         )

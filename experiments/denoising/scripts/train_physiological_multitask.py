@@ -506,8 +506,18 @@ def infer_experiment_variant(args: argparse.Namespace) -> str:
         if args.bottleneck_type == "mhsa":
             return "physiological_multitask_v4_typed_scale_pred_mask_constrained_mhsa"
         return "physiological_multitask_v4_typed_scale_pred_mask_constrained_editing"
-    if args.input_mode == "pred_mask" and args.backbone_type == "multiscale_tcn_unet":
-        return "physiological_multitask_v4_multiscale_tcn_pred_mask_constrained_editing"
+    if args.input_mode == "pred_mask" and args.model_variant == "legacy_single_residual":
+        pred_mask_backbone_variants = {
+            "unet": "physiological_multitask_v4_unet_pred_mask_constrained_editing",
+            "modern_tcn": "physiological_multitask_v4_legacy_modern_tcn_pred_mask_constrained_editing",
+            "multiscale_unet": "physiological_multitask_v4_multiscale_unet_pred_mask_constrained_editing",
+            "tcn_unet": "physiological_multitask_v4_tcn_unet_pred_mask_constrained_editing",
+            "multiscale_tcn_unet": "physiological_multitask_v4_multiscale_tcn_pred_mask_constrained_editing",
+            "modern_tcn_unet": "physiological_multitask_v4_modern_tcn_unet_pred_mask_constrained_editing",
+            "multiscale_modern_tcn_unet": "physiological_multitask_v4_multiscale_modern_tcn_unet_pred_mask_constrained_editing",
+        }
+        if args.backbone_type in pred_mask_backbone_variants:
+            return pred_mask_backbone_variants[args.backbone_type]
     if args.input_mode == "no_mask":
         return "physiological_multitask_v1_no_mask"
     if args.input_mode == "gt_mask" and args.gate_mode == "none":
@@ -539,7 +549,15 @@ def main() -> None:
     )
     parser.add_argument(
         "--backbone_type",
-        choices=["unet", "modern_tcn", "multiscale_tcn_unet"],
+        choices=[
+            "unet",
+            "modern_tcn",
+            "multiscale_unet",
+            "tcn_unet",
+            "multiscale_tcn_unet",
+            "modern_tcn_unet",
+            "multiscale_modern_tcn_unet",
+        ],
         default="unet",
     )
     parser.add_argument("--bottleneck_type", choices=["none", "mhsa"], default="none")
