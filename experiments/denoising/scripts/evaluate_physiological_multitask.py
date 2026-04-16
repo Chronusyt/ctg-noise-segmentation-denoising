@@ -93,6 +93,7 @@ def infer_backbone_type(ckpt: dict) -> str:
         "multiscale_unet",
         "tcn_unet",
         "multiscale_tcn_unet",
+        "convnext1d_unet",
         "modern_tcn_unet",
         "multiscale_modern_tcn_unet",
     }:

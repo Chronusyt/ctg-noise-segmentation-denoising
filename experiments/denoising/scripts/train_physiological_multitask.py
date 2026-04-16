@@ -513,6 +513,7 @@ def infer_experiment_variant(args: argparse.Namespace) -> str:
             "multiscale_unet": "physiological_multitask_v4_multiscale_unet_pred_mask_constrained_editing",
             "tcn_unet": "physiological_multitask_v4_tcn_unet_pred_mask_constrained_editing",
             "multiscale_tcn_unet": "physiological_multitask_v4_multiscale_tcn_pred_mask_constrained_editing",
+            "convnext1d_unet": "physiological_multitask_v4_convnext1d_unet_pred_mask_constrained_editing",
             "modern_tcn_unet": "physiological_multitask_v4_modern_tcn_unet_pred_mask_constrained_editing",
             "multiscale_modern_tcn_unet": "physiological_multitask_v4_multiscale_modern_tcn_unet_pred_mask_constrained_editing",
         }
@@ -555,6 +556,7 @@ def main() -> None:
             "multiscale_unet",
             "tcn_unet",
             "multiscale_tcn_unet",
+            "convnext1d_unet",
             "modern_tcn_unet",
             "multiscale_modern_tcn_unet",
         ],

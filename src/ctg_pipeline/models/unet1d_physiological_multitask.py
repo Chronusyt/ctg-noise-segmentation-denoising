@@ -31,6 +31,7 @@ import torch.nn as nn
 try:
     from .modern_tcn_backbone import ModernTCNBackbone1D
     from .multiscale_tcn_unet_backbone import (
+        ConvNeXtUNetBackbone1D,
         ModernTCNUNetBackbone1D,
         MultiscaleModernTCNUNetBackbone1D,
         MultiscaleTCNUNetBackbone1D,
@@ -41,6 +42,7 @@ try:
 except ImportError:  # Allow standalone smoke tests.
     from modern_tcn_backbone import ModernTCNBackbone1D
     from multiscale_tcn_unet_backbone import (
+        ConvNeXtUNetBackbone1D,
         ModernTCNUNetBackbone1D,
         MultiscaleModernTCNUNetBackbone1D,
         MultiscaleTCNUNetBackbone1D,
@@ -60,6 +62,7 @@ BACKBONE_TYPES = {
     "multiscale_unet",
     "tcn_unet",
     "multiscale_tcn_unet",
+    "convnext1d_unet",
     "modern_tcn_unet",
     "multiscale_modern_tcn_unet",
 }
@@ -196,6 +199,17 @@ class UNet1DPhysiologicalMultitask(nn.Module):
             )
             time_channels = self.multiscale_tcn_unet_backbone.time_channels
             global_channels = self.multiscale_tcn_unet_backbone.global_channels
+        elif self.backbone_type == "convnext1d_unet":
+            self.shared_backbone = ConvNeXtUNetBackbone1D(
+                in_channels=in_channels,
+                base_channels=base_channels,
+                depth=depth,
+                dropout=dropout,
+                bottleneck_type=bottleneck_type,
+                blocks_per_stage=modern_tcn_blocks_per_stage,
+            )
+            time_channels = self.shared_backbone.time_channels
+            global_channels = self.shared_backbone.global_channels
         elif self.backbone_type == "modern_tcn_unet":
             self.shared_backbone = ModernTCNUNetBackbone1D(
                 in_channels=in_channels,
@@ -399,6 +413,7 @@ def _test() -> None:
         "multiscale_unet",
         "tcn_unet",
         "multiscale_tcn_unet",
+        "convnext1d_unet",
         "modern_tcn_unet",
         "multiscale_modern_tcn_unet",
     )
@@ -422,7 +437,7 @@ def _test() -> None:
             for key in ("baseline", "stv", "ltv", "baseline_variability"):
                 assert y[key].shape == (2,), f"{key}: {y[key].shape}"
 
-    for backbone_type in ("unet", "modern_tcn", "tcn_unet", "modern_tcn_unet"):
+    for backbone_type in ("unet", "modern_tcn", "tcn_unet", "convnext1d_unet", "modern_tcn_unet"):
         model = UNet1DPhysiologicalMultitask(
             in_channels=6,
             base_channels=16,

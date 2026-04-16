@@ -91,6 +91,51 @@ class DilatedResidualTCNBlock1D(nn.Module):
         return self.activation(x + self.block(x))
 
 
+class ConvNeXtBlock1D(nn.Module):
+    """A lightweight ConvNeXt-style residual block for 1D signals."""
+
+    def __init__(
+        self,
+        channels: int,
+        kernel_size: int = 7,
+        expansion: int = 4,
+        dropout: float = 0.0,
+        layer_scale_init_value: float = 1e-6,
+    ) -> None:
+        super().__init__()
+        hidden_channels = channels * expansion
+        self.depthwise = nn.Conv1d(
+            channels,
+            channels,
+            kernel_size=kernel_size,
+            padding=kernel_size // 2,
+            groups=channels,
+        )
+        self.norm = nn.LayerNorm(channels)
+        self.pointwise_in = nn.Linear(channels, hidden_channels)
+        self.activation = nn.GELU()
+        self.pointwise_out = nn.Linear(hidden_channels, channels)
+        self.dropout = nn.Dropout(dropout)
+        self.gamma = (
+            nn.Parameter(layer_scale_init_value * torch.ones(channels))
+            if layer_scale_init_value > 0
+            else None
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        residual = x
+        h = self.depthwise(x).transpose(1, 2)
+        h = self.norm(h)
+        h = self.pointwise_in(h)
+        h = self.activation(h)
+        h = self.dropout(h)
+        h = self.pointwise_out(h)
+        if self.gamma is not None:
+            h = h * self.gamma
+        h = self.dropout(h).transpose(1, 2)
+        return residual + h
+
+
 class MHSABottleneck1D(nn.Module):
     """A small pre-norm self-attention bottleneck for low-resolution features."""
 
@@ -162,6 +207,27 @@ def _make_modern_tcn_stage(
                 channels,
                 kernel_size=kernel_size,
                 dilation=base_dilation * (2**block_idx),
+                expansion=expansion,
+                dropout=dropout,
+            )
+        )
+    return nn.Sequential(*blocks)
+
+
+def _make_convnext_stage(
+    channels: int,
+    _stage_idx: int,
+    blocks_per_stage: int,
+    kernel_size: int,
+    expansion: int,
+    dropout: float,
+) -> nn.Sequential:
+    blocks = []
+    for _ in range(blocks_per_stage):
+        blocks.append(
+            ConvNeXtBlock1D(
+                channels,
+                kernel_size=kernel_size,
                 expansion=expansion,
                 dropout=dropout,
             )
@@ -418,6 +484,38 @@ class ModernTCNUNetBackbone1D(_EncoderDecoderBackbone1D):
         )
 
 
+class ConvNeXtUNetBackbone1D(_EncoderDecoderBackbone1D):
+    """Single-scale stem + ConvNeXt1D encoder + U-Net decoder."""
+
+    def __init__(
+        self,
+        in_channels: int,
+        base_channels: int = 32,
+        depth: int = 4,
+        dropout: float = 0.0,
+        bottleneck_type: str = "none",
+        blocks_per_stage: int = 2,
+        kernel_size: int = 7,
+        expansion: int = 4,
+    ) -> None:
+        super().__init__(
+            in_channels=in_channels,
+            base_channels=base_channels,
+            depth=depth,
+            dropout=dropout,
+            bottleneck_type=bottleneck_type,
+            stem_factory=SingleScaleConvStem1D,
+            stage_factory=lambda channels, stage_idx: _make_convnext_stage(
+                channels,
+                stage_idx,
+                blocks_per_stage=blocks_per_stage,
+                kernel_size=kernel_size,
+                expansion=expansion,
+                dropout=dropout,
+            ),
+        )
+
+
 class MultiscaleModernTCNUNetBackbone1D(_EncoderDecoderBackbone1D):
     """Multi-scale stem + ModernTCN encoder + U-Net decoder."""
 
@@ -456,6 +554,7 @@ def _test() -> None:
         (MultiscaleUNetBackbone1D, {"depth": 4}),
         (TCNUNetBackbone1D, {"depth": 4}),
         (ModernTCNUNetBackbone1D, {"depth": 4}),
+        (ConvNeXtUNetBackbone1D, {"depth": 4}),
         (MultiscaleModernTCNUNetBackbone1D, {"depth": 4}),
     ]
     for cls, kwargs in configs:
