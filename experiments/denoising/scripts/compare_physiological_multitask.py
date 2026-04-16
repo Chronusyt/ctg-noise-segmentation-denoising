@@ -152,6 +152,8 @@ def infer_multitask_label(data: dict) -> str:
             "physiological_multitask_v4_multiscale_convnext1d_unet_pred_mask_constrained_editing": "Physiological multitask v4 pred-mask multiscale ConvNeXt1D-U-Net backbone",
             "physiological_multitask_v4_modern_tcn_unet_pred_mask_constrained_editing": "Physiological multitask v4 pred-mask ModernTCN-U-Net backbone",
             "physiological_multitask_v4_multiscale_modern_tcn_unet_pred_mask_constrained_editing": "Physiological multitask v4 pred-mask multiscale ModernTCN-U-Net backbone",
+            "physiological_multitask_v5_context_tcn_unet_pred_mask_constrained_editing": "Physiological multitask v5 pred-mask TCN-U-Net + same-parent context",
+            "physiological_multitask_v5_context_convnext1d_unet_pred_mask_constrained_editing": "Physiological multitask v5 pred-mask ConvNeXt1D-U-Net + same-parent context",
             "physiological_multitask_v4_typed_scale_pred_mask_constrained_editing": "Physiological multitask v4 pred-mask typed scale",
             "physiological_multitask_v4_typed_scale_pred_mask_constrained_mhsa": "Physiological multitask v4 pred-mask typed scale + mhsa",
         }

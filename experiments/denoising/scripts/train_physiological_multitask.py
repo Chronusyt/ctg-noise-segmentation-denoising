@@ -104,6 +104,14 @@ def validate_args(args: argparse.Namespace) -> None:
     if args.backbone_type != "multiscale_tcn_unet" and args.bottleneck_type != "none":
         raise ValueError("bottleneck_type=mhsa 仅支持 backbone_type=multiscale_tcn_unet")
 
+    if args.use_context_chunks:
+        if args.input_mode != "pred_mask":
+            raise ValueError("Stage-1 context conditioning 只支持 input_mode=pred_mask")
+        if args.model_variant != "legacy_single_residual":
+            raise ValueError("Stage-1 context conditioning 只支持 model_variant=legacy_single_residual")
+        if args.context_mode != "same_parent_neighbors":
+            raise ValueError("Stage-1 context conditioning 目前只支持 context_mode=same_parent_neighbors")
+
     if args.model_variant == "typed_scale_residual":
         if args.input_mode != "pred_mask":
             raise ValueError("typed_scale_residual 第一版只支持 input_mode=pred_mask")
@@ -147,6 +155,16 @@ def build_model_input(batch: dict, device: str, input_mode: str) -> torch.Tensor
         mask = batch["pred_mask"].to(device)
         return torch.cat([noisy, mask], dim=1)
     raise ValueError(f"Unsupported input_mode: {input_mode}")
+
+
+def build_context_inputs(batch: dict, device: str, args: argparse.Namespace) -> Dict[str, torch.Tensor]:
+    if not args.use_context_chunks:
+        return {}
+    return {
+        "context_noisy_signal": batch["context_noisy_signal"].to(device),
+        "context_pred_mask": batch["context_pred_mask"].to(device),
+        "context_valid": batch["context_valid"].to(device),
+    }
 
 
 def build_edit_gate(batch: dict, device: str, input_mode: str, args: argparse.Namespace) -> torch.Tensor | None:
@@ -387,13 +405,14 @@ def run_epoch(
 
     for batch in loader:
         x = build_model_input(batch, device, args.input_mode)
+        context_kwargs = build_context_inputs(batch, device, args)
         edit_gate = build_edit_gate(batch, device, args.input_mode, args)
         if is_train:
             optimizer.zero_grad(set_to_none=True)
             if gradnorm_optimizer is not None:
                 gradnorm_optimizer.zero_grad(set_to_none=True)
         with torch.set_grad_enabled(is_train):
-            outputs = model(x, edit_gate=edit_gate)
+            outputs = model(x, edit_gate=edit_gate, **context_kwargs)
             losses = compute_losses(outputs, batch, device, label_stats, acc_loss_fn, dec_loss_fn, args)
             total_loss, _weight_map, gradnorm_loss = balance_losses(
                 losses,
@@ -502,6 +521,14 @@ def append_train_log(path: str, epoch: int, lr: float, train: dict, val: dict) -
 
 
 def infer_experiment_variant(args: argparse.Namespace) -> str:
+    if args.use_context_chunks and args.input_mode == "pred_mask" and args.model_variant == "legacy_single_residual":
+        context_variants = {
+            "tcn_unet": "physiological_multitask_v5_context_tcn_unet_pred_mask_constrained_editing",
+            "convnext1d_unet": "physiological_multitask_v5_context_convnext1d_unet_pred_mask_constrained_editing",
+        }
+        if args.backbone_type in context_variants:
+            return context_variants[args.backbone_type]
+        return f"physiological_multitask_v5_context_{args.backbone_type}_pred_mask_constrained_editing"
     if args.input_mode == "pred_mask" and args.model_variant == "typed_scale_residual":
         if args.bottleneck_type == "mhsa":
             return "physiological_multitask_v4_typed_scale_pred_mask_constrained_mhsa"
@@ -577,6 +604,13 @@ def main() -> None:
         help="Optional directory with train/val/test_pred_masks.npz. When omitted, use embedded pred_masks if present.",
     )
     parser.add_argument("--pred_mask_variant", choices=["soft", "hard"], default="soft")
+    parser.add_argument("--use_context_chunks", action="store_true")
+    parser.add_argument("--context_mode", choices=["same_parent_neighbors"], default="same_parent_neighbors")
+    parser.add_argument("--context_radius", type=int, default=5)
+    parser.add_argument("--context_include_center", action="store_true")
+    parser.add_argument("--context_use_pred_mask", dest="context_use_pred_mask", action="store_true")
+    parser.add_argument("--no_context_use_pred_mask", dest="context_use_pred_mask", action="store_false")
+    parser.add_argument("--context_fusion", choices=["film"], default="film")
     parser.add_argument("--gate_mode", choices=["none", "union_soft", "union_dilated_soft"], default="none")
     parser.add_argument("--clean_gate_value", type=float, default=0.1)
     parser.add_argument("--gate_dilation_radius", type=int, default=5)
@@ -632,6 +666,7 @@ def main() -> None:
     parser.add_argument("--clip_grad_norm", type=float, default=5.0)
     parser.add_argument("--max_train_samples", type=int, default=0, help="Debug only; 0 means full train split")
     parser.add_argument("--max_val_samples", type=int, default=0, help="Debug only; 0 means full val split")
+    parser.set_defaults(context_use_pred_mask=True)
     args = parser.parse_args()
 
     args.data_dir = str(resolve_repo_path(args.data_dir))
@@ -652,6 +687,13 @@ def main() -> None:
     print(f"loss balance: {args.loss_balance_mode}", flush=True)
     print(f"pred mask cache: {args.pred_mask_cache_dir or 'embedded_or_none'}", flush=True)
     print(f"pred mask variant: {args.pred_mask_variant}", flush=True)
+    print(f"use context chunks: {args.use_context_chunks}", flush=True)
+    if args.use_context_chunks:
+        print(
+            f"context mode: {args.context_mode}, radius={args.context_radius}, "
+            f"include_center={args.context_include_center}, fusion={args.context_fusion}",
+            flush=True,
+        )
     print(f"gate 模式: {args.gate_mode}", flush=True)
     print(f"重建模式: {args.reconstruction_mode}", flush=True)
     print(f"identity region: {args.identity_region}", flush=True)
@@ -669,11 +711,23 @@ def main() -> None:
         train_path,
         pred_mask_cache_path=pred_mask_cache_path_for_split(args.pred_mask_cache_dir, "train"),
         pred_mask_variant=args.pred_mask_variant,
+        use_context_chunks=args.use_context_chunks,
+        context_mode=args.context_mode,
+        context_radius=args.context_radius,
+        context_include_center=args.context_include_center,
+        context_use_pred_mask=args.context_use_pred_mask,
+        input_mode=args.input_mode,
     )
     val_full = ClinicalMultitaskDataset(
         val_path,
         pred_mask_cache_path=pred_mask_cache_path_for_split(args.pred_mask_cache_dir, "val"),
         pred_mask_variant=args.pred_mask_variant,
+        use_context_chunks=args.use_context_chunks,
+        context_mode=args.context_mode,
+        context_radius=args.context_radius,
+        context_include_center=args.context_include_center,
+        context_use_pred_mask=args.context_use_pred_mask,
+        input_mode=args.input_mode,
     )
     train_ds = make_subset(train_full, args.max_train_samples, args.seed)
     val_ds = make_subset(val_full, args.max_val_samples, args.seed + 1)
@@ -718,6 +772,8 @@ def main() -> None:
         modern_tcn_blocks_per_stage=args.modern_tcn_blocks_per_stage,
         modern_tcn_kernel_size=args.modern_tcn_kernel_size,
         modern_tcn_expansion=args.modern_tcn_expansion,
+        use_context_chunks=args.use_context_chunks,
+        context_fusion=args.context_fusion,
     ).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     gradnorm_balancer = None

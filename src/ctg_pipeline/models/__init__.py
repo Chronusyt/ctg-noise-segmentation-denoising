@@ -1,5 +1,6 @@
 """Model definitions used across CTG denoising experiments."""
 
+from .context_conditioning import ContextConditioner
 from .modern_tcn_backbone import ModernTCNBackbone1D
 from .multiscale_tcn_unet_backbone import (
     ConvNeXtUNetBackbone1D,
@@ -19,6 +20,7 @@ from .unet1d_segmentation import UNet1DSegmentation
 
 __all__ = [
     "ModernTCNBackbone1D",
+    "ContextConditioner",
     "ConvNeXtUNetBackbone1D",
     "MultiscaleConvNeXtUNetBackbone1D",
     "ModernTCNUNetBackbone1D",

@@ -29,6 +29,7 @@ import torch
 import torch.nn as nn
 
 try:
+    from .context_conditioning import ContextConditioner
     from .modern_tcn_backbone import ModernTCNBackbone1D
     from .multiscale_tcn_unet_backbone import (
         ConvNeXtUNetBackbone1D,
@@ -41,6 +42,7 @@ try:
     )
     from .unet1d_denoiser import DoubleConv1D
 except ImportError:  # Allow standalone smoke tests.
+    from context_conditioning import ContextConditioner
     from modern_tcn_backbone import ModernTCNBackbone1D
     from multiscale_tcn_unet_backbone import (
         ConvNeXtUNetBackbone1D,
@@ -122,6 +124,8 @@ class UNet1DPhysiologicalMultitask(nn.Module):
         modern_tcn_blocks_per_stage: int = 2,
         modern_tcn_kernel_size: int = 5,
         modern_tcn_expansion: int = 2,
+        use_context_chunks: bool = False,
+        context_fusion: str = "film",
     ):
         super().__init__()
         self.depth = depth
@@ -135,9 +139,14 @@ class UNet1DPhysiologicalMultitask(nn.Module):
             raise ValueError(f"Unsupported bottleneck_type: {bottleneck_type}")
         self.backbone_type = backbone_type
         self.bottleneck_type = bottleneck_type
+        self.use_context_chunks = bool(use_context_chunks)
+        self.context_fusion = context_fusion
         self.num_experts = NUM_EXPERTS
         self.shared_backbone = None
         self.multiscale_tcn_unet_backbone = None
+
+        if self.use_context_chunks and self.model_variant != "legacy_single_residual":
+            raise ValueError("Stage-1 context conditioning 只支持 legacy_single_residual")
 
         if self.backbone_type == "unet":
             self.enc = nn.ModuleList()
@@ -281,6 +290,16 @@ class UNet1DPhysiologicalMultitask(nn.Module):
         self.stv_head = ScalarRegressionHead(global_channels, scalar_hidden_channels, dropout)
         self.ltv_head = ScalarRegressionHead(global_channels, scalar_hidden_channels, dropout)
         self.baseline_variability_head = ScalarRegressionHead(global_channels, scalar_hidden_channels, dropout)
+        self.context_conditioner = (
+            ContextConditioner(
+                time_channels=time_channels,
+                global_channels=global_channels,
+                context_embedding_dim=max(64, base_channels * 2),
+                context_fusion=context_fusion,
+            )
+            if self.use_context_chunks
+            else None
+        )
 
     def _forward_unet_features(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         skips = []
@@ -396,8 +415,26 @@ class UNet1DPhysiologicalMultitask(nn.Module):
             return self.shared_backbone.reference_parameter()
         return self.shared_backbone.stem[0].weight
 
-    def forward(self, x: torch.Tensor, edit_gate: torch.Tensor | None = None) -> Dict[str, torch.Tensor]:
+    def forward(
+        self,
+        x: torch.Tensor,
+        edit_gate: torch.Tensor | None = None,
+        context_noisy_signal: torch.Tensor | None = None,
+        context_pred_mask: torch.Tensor | None = None,
+        context_valid: torch.Tensor | None = None,
+    ) -> Dict[str, torch.Tensor]:
         time_features, global_features = self._forward_features(x)
+        context_global = None
+        if self.context_conditioner is not None:
+            if context_noisy_signal is None or context_pred_mask is None or context_valid is None:
+                raise ValueError("Context-enabled model requires context_noisy_signal/context_pred_mask/context_valid")
+            time_features, global_features, context_global = self.context_conditioner(
+                time_features,
+                global_features,
+                context_noisy_signal=context_noisy_signal,
+                context_pred_mask=context_pred_mask,
+                context_valid=context_valid,
+            )
         residual_outputs = self._fused_residual(x, time_features)
         raw_residual = residual_outputs["raw_residual"]
         gated_residual = raw_residual if edit_gate is None else raw_residual * edit_gate
@@ -416,6 +453,8 @@ class UNet1DPhysiologicalMultitask(nn.Module):
             "ltv": self.ltv_head(global_features),
             "baseline_variability": self.baseline_variability_head(global_features),
         }
+        if context_global is not None:
+            outputs["context_global"] = context_global
         outputs.update({k: v for k, v in residual_outputs.items() if k != "raw_residual"})
         return outputs
 
@@ -451,6 +490,25 @@ def _test() -> None:
             assert y["dec_logits"].shape == (2, 1, 240)
             for key in ("baseline", "stv", "ltv", "baseline_variability"):
                 assert y[key].shape == (2,), f"{key}: {y[key].shape}"
+
+    for backbone_type in ("tcn_unet", "convnext1d_unet"):
+        model = UNet1DPhysiologicalMultitask(
+            in_channels=6,
+            base_channels=16,
+            depth=4,
+            model_variant="legacy_single_residual",
+            backbone_type=backbone_type,
+            use_context_chunks=True,
+        )
+        y = model(
+            torch.randn(2, 6, 240),
+            edit_gate=torch.rand(2, 1, 240),
+            context_noisy_signal=torch.randn(2, 10, 1, 240),
+            context_pred_mask=torch.randn(2, 10, 5, 240),
+            context_valid=torch.ones(2, 10),
+        )
+        assert y["context_global"].shape[0] == 2
+        assert y["reconstruction"].shape == (2, 1, 240)
 
     for backbone_type in ("unet", "modern_tcn", "tcn_unet", "convnext1d_unet", "multiscale_convnext1d_unet", "modern_tcn_unet"):
         model = UNet1DPhysiologicalMultitask(

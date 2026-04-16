@@ -20,7 +20,12 @@ for _path in (_REPO_ROOT, _SRC_ROOT):
         sys.path.insert(0, str(_path))
 
 from ctg_pipeline.features.physiology import FeatureConfig, compute_multitask_physiology_labels
-from ctg_pipeline.data.multitask_dataset import load_multitask_arrays
+from ctg_pipeline.data.multitask_dataset import (
+    build_parent_chunk_index,
+    context_offsets,
+    fetch_same_parent_neighbor_context,
+    load_multitask_arrays,
+)
 from ctg_pipeline.models.unet1d_physiological_multitask import ARTIFACT_CLASS_ORDER, UNet1DPhysiologicalMultitask
 from ctg_pipeline.utils.editing import build_edit_gate_torch, compute_region_masks_torch
 from ctg_pipeline.utils.pathing import ARTIFACTS_ROOT, DENOISING_DATASETS_ROOT, resolve_repo_path
@@ -116,6 +121,62 @@ def infer_bottleneck_type(ckpt: dict) -> str:
     return "none"
 
 
+def infer_use_context_chunks(args: argparse.Namespace, ckpt: dict) -> bool:
+    return bool(args.use_context_chunks or ckpt.get("config", {}).get("use_context_chunks", False))
+
+
+def infer_context_mode(args: argparse.Namespace, ckpt: dict) -> str:
+    if args.context_mode:
+        return args.context_mode
+    return ckpt.get("config", {}).get("context_mode", "same_parent_neighbors")
+
+
+def infer_context_radius(args: argparse.Namespace, ckpt: dict) -> int:
+    if args.context_radius >= 0:
+        return int(args.context_radius)
+    return int(ckpt.get("config", {}).get("context_radius", 5))
+
+
+def infer_context_include_center(args: argparse.Namespace, ckpt: dict) -> bool:
+    if args.context_include_center:
+        return True
+    return bool(ckpt.get("config", {}).get("context_include_center", False))
+
+
+def build_context_chunk(
+    data: dict,
+    parent_chunk_to_row: dict[int, dict[int, int]] | None,
+    start: int,
+    end: int,
+    *,
+    context_radius: int,
+    context_include_center: bool,
+) -> dict[str, np.ndarray]:
+    if parent_chunk_to_row is None:
+        raise ValueError("Context evaluation requires parent/chunk lookup")
+    offsets = context_offsets(context_radius, context_include_center)
+    context_rows = []
+    for row_index in range(start, end):
+        context_rows.append(
+            fetch_same_parent_neighbor_context(
+                row_index=row_index,
+                noisy_signals=np.asarray(data["noisy_signals"], dtype=np.float32),
+                pred_masks=np.asarray(data["pred_masks"], dtype=np.float32) if "pred_masks" in data else None,
+                parent_index=np.asarray(data["parent_index"], dtype=np.int64),
+                chunk_index=np.asarray(data["chunk_index"], dtype=np.int64),
+                parent_chunk_to_row=parent_chunk_to_row,
+                offsets=offsets,
+                context_use_pred_mask=True,
+            )
+        )
+    return {
+        "context_noisy_signal": np.stack([row["context_noisy_signal"] for row in context_rows], axis=0),
+        "context_pred_mask": np.stack([row["context_pred_mask"] for row in context_rows], axis=0),
+        "context_valid": np.stack([row["context_valid"] for row in context_rows], axis=0),
+        "context_chunk_index": np.stack([row["context_chunk_index"] for row in context_rows], axis=0),
+    }
+
+
 def make_model_from_checkpoint(ckpt: dict, input_mode: str) -> UNet1DPhysiologicalMultitask:
     config = ckpt.get("config", {})
     in_channels = int(config.get("in_channels", 6 if input_mode in {"gt_mask", "pred_mask"} else 1))
@@ -132,6 +193,8 @@ def make_model_from_checkpoint(ckpt: dict, input_mode: str) -> UNet1DPhysiologic
         modern_tcn_blocks_per_stage=int(config.get("modern_tcn_blocks_per_stage", 2)),
         modern_tcn_kernel_size=int(config.get("modern_tcn_kernel_size", 5)),
         modern_tcn_expansion=int(config.get("modern_tcn_expansion", 2)),
+        use_context_chunks=bool(config.get("use_context_chunks", False)),
+        context_fusion=str(config.get("context_fusion", "film")),
     )
 
 
@@ -187,6 +250,10 @@ def predict(
     input_mode: str,
     gate_mode: str,
     ckpt_config: dict,
+    use_context_chunks: bool = False,
+    context_mode: str = "same_parent_neighbors",
+    context_radius: int = 5,
+    context_include_center: bool = False,
 ) -> dict:
     model.eval()
     preds = {
@@ -198,13 +265,35 @@ def predict(
         "ltv": [],
         "baseline_variability": [],
     }
+    parent_chunk_to_row = None
+    if use_context_chunks:
+        if context_mode != "same_parent_neighbors":
+            raise ValueError(f"Unsupported context_mode: {context_mode}")
+        if "parent_index" not in data or "chunk_index" not in data:
+            raise KeyError("Context evaluation requires parent_index and chunk_index")
+        parent_chunk_to_row = build_parent_chunk_index(data["parent_index"], data["chunk_index"])
     with torch.no_grad():
         n = data["noisy_signals"].shape[0]
         for start in range(0, n, batch_size):
             end = min(start + batch_size, n)
             x = torch.from_numpy(build_input_chunk(data, start, end, input_mode)).to(device)
             edit_gate = build_gate_chunk(data, start, end, input_mode, gate_mode, ckpt_config, device)
-            out = model(x, edit_gate=edit_gate)
+            context_kwargs = {}
+            if use_context_chunks:
+                context_batch = build_context_chunk(
+                    data,
+                    parent_chunk_to_row,
+                    start,
+                    end,
+                    context_radius=context_radius,
+                    context_include_center=context_include_center,
+                )
+                context_kwargs = {
+                    "context_noisy_signal": torch.from_numpy(context_batch["context_noisy_signal"]).to(device),
+                    "context_pred_mask": torch.from_numpy(context_batch["context_pred_mask"]).to(device),
+                    "context_valid": torch.from_numpy(context_batch["context_valid"]).to(device),
+                }
+            out = model(x, edit_gate=edit_gate, **context_kwargs)
             preds["reconstruction"].append(out["reconstruction"].cpu().numpy()[:, 0, :])
             preds["acc_logits"].append(out["acc_logits"].cpu().numpy()[:, 0, :])
             preds["dec_logits"].append(out["dec_logits"].cpu().numpy()[:, 0, :])
@@ -647,6 +736,10 @@ def main() -> None:
     parser.add_argument("--pred_mask_variant", choices=["soft", "hard"], default="soft")
     parser.add_argument("--input_mode", choices=["no_mask", "gt_mask", "pred_mask"], default="")
     parser.add_argument("--gate_mode", choices=["none", "union_soft", "union_dilated_soft"], default="")
+    parser.add_argument("--use_context_chunks", action="store_true")
+    parser.add_argument("--context_mode", choices=["same_parent_neighbors"], default="")
+    parser.add_argument("--context_radius", type=int, default=-1)
+    parser.add_argument("--context_include_center", action="store_true")
     parser.add_argument("--boundary_k", type=int, default=-1)
     parser.add_argument("--no_derived_features", action="store_true")
     parser.add_argument("--derived_chunk_size", type=int, default=4096)
@@ -683,11 +776,19 @@ def main() -> None:
     backbone_type = infer_backbone_type(ckpt)
     loss_balance_mode = infer_loss_balance_mode(ckpt)
     bottleneck_type = infer_bottleneck_type(ckpt)
+    use_context_chunks = infer_use_context_chunks(args, ckpt)
+    context_mode = infer_context_mode(args, ckpt)
+    context_radius = infer_context_radius(args, ckpt)
+    context_include_center = infer_context_include_center(args, ckpt)
     boundary_k = args.boundary_k if args.boundary_k >= 0 else int(ckpt_config.get("boundary_k", 5))
     acc_threshold = args.acc_threshold if args.acc_threshold >= 0 else args.threshold
     dec_threshold = args.dec_threshold if args.dec_threshold >= 0 else args.threshold
     if model_variant == "typed_scale_residual" and input_mode != "pred_mask":
         raise ValueError("typed_scale_residual checkpoint 第一版只支持 pred_mask 评估")
+    if use_context_chunks and input_mode != "pred_mask":
+        raise ValueError("Stage-1 context conditioning 只支持 pred_mask 评估")
+    if use_context_chunks and model_variant != "legacy_single_residual":
+        raise ValueError("Stage-1 context conditioning 只支持 legacy_single_residual 评估")
     print(f"输入模式: {input_mode}", flush=True)
     print(f"模型变体: {model_variant}", flush=True)
     print(f"backbone: {backbone_type}", flush=True)
@@ -695,6 +796,13 @@ def main() -> None:
     print(f"loss balance: {loss_balance_mode}", flush=True)
     print(f"pred mask cache: {args.pred_mask_cache_dir or 'embedded_or_none'}", flush=True)
     print(f"pred mask variant: {args.pred_mask_variant}", flush=True)
+    print(f"use context chunks: {use_context_chunks}", flush=True)
+    if use_context_chunks:
+        print(
+            f"context mode: {context_mode}, radius={context_radius}, "
+            f"include_center={context_include_center}",
+            flush=True,
+        )
     print(f"gate 模式: {gate_mode}", flush=True)
     print(f"boundary_k: {boundary_k}", flush=True)
     print(f"thresholds: acc={acc_threshold}, dec={dec_threshold}", flush=True)
@@ -703,7 +811,20 @@ def main() -> None:
     model.load_state_dict(ckpt["model_state_dict"] if "model_state_dict" in ckpt else ckpt)
     model = model.to(device)
 
-    preds = predict(model, data, label_stats, device, args.batch_size, input_mode=input_mode, gate_mode=gate_mode, ckpt_config=ckpt_config)
+    preds = predict(
+        model,
+        data,
+        label_stats,
+        device,
+        args.batch_size,
+        input_mode=input_mode,
+        gate_mode=gate_mode,
+        ckpt_config=ckpt_config,
+        use_context_chunks=use_context_chunks,
+        context_mode=context_mode,
+        context_radius=context_radius,
+        context_include_center=context_include_center,
+    )
 
     region_masks_torch = compute_region_masks_torch(
         torch.from_numpy(np.transpose(data["masks"], (0, 2, 1)).astype(np.float32)),
@@ -726,6 +847,10 @@ def main() -> None:
             "backbone_type": backbone_type,
             "bottleneck_type": bottleneck_type,
             "loss_balance_mode": loss_balance_mode,
+            "use_context_chunks": use_context_chunks,
+            "context_mode": context_mode if use_context_chunks else None,
+            "context_radius": context_radius if use_context_chunks else None,
+            "context_include_center": context_include_center if use_context_chunks else None,
             "experiment_variant": ckpt_config.get("experiment_variant", ckpt_config.get("model_variant", "")),
             "artifact_class_order": ckpt_config.get("artifact_class_order", list(ARTIFACT_CLASS_ORDER)),
         },
