@@ -4,6 +4,7 @@ from .modern_tcn_backbone import ModernTCNBackbone1D
 from .multiscale_tcn_unet_backbone import (
     ConvNeXtUNetBackbone1D,
     ModernTCNUNetBackbone1D,
+    MultiscaleConvNeXtUNetBackbone1D,
     MultiscaleModernTCNUNetBackbone1D,
     MultiscaleTCNUNetBackbone1D,
     MultiscaleUNetBackbone1D,
@@ -19,6 +20,7 @@ from .unet1d_segmentation import UNet1DSegmentation
 __all__ = [
     "ModernTCNBackbone1D",
     "ConvNeXtUNetBackbone1D",
+    "MultiscaleConvNeXtUNetBackbone1D",
     "ModernTCNUNetBackbone1D",
     "MultiscaleTCNUNetBackbone1D",
     "MultiscaleModernTCNUNetBackbone1D",

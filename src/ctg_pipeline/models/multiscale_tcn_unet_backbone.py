@@ -516,6 +516,38 @@ class ConvNeXtUNetBackbone1D(_EncoderDecoderBackbone1D):
         )
 
 
+class MultiscaleConvNeXtUNetBackbone1D(_EncoderDecoderBackbone1D):
+    """Multi-scale stem + ConvNeXt1D encoder + U-Net decoder."""
+
+    def __init__(
+        self,
+        in_channels: int,
+        base_channels: int = 32,
+        depth: int = 4,
+        dropout: float = 0.0,
+        bottleneck_type: str = "none",
+        blocks_per_stage: int = 2,
+        kernel_size: int = 7,
+        expansion: int = 4,
+    ) -> None:
+        super().__init__(
+            in_channels=in_channels,
+            base_channels=base_channels,
+            depth=depth,
+            dropout=dropout,
+            bottleneck_type=bottleneck_type,
+            stem_factory=MultiScaleConvStem1D,
+            stage_factory=lambda channels, stage_idx: _make_convnext_stage(
+                channels,
+                stage_idx,
+                blocks_per_stage=blocks_per_stage,
+                kernel_size=kernel_size,
+                expansion=expansion,
+                dropout=dropout,
+            ),
+        )
+
+
 class MultiscaleModernTCNUNetBackbone1D(_EncoderDecoderBackbone1D):
     """Multi-scale stem + ModernTCN encoder + U-Net decoder."""
 
@@ -555,6 +587,7 @@ def _test() -> None:
         (TCNUNetBackbone1D, {"depth": 4}),
         (ModernTCNUNetBackbone1D, {"depth": 4}),
         (ConvNeXtUNetBackbone1D, {"depth": 4}),
+        (MultiscaleConvNeXtUNetBackbone1D, {"depth": 4}),
         (MultiscaleModernTCNUNetBackbone1D, {"depth": 4}),
     ]
     for cls, kwargs in configs:
